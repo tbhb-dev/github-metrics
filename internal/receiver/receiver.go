@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -20,6 +21,14 @@ import (
 const MaxBody = 25 << 20
 
 const signaturePrefix = "sha256="
+
+// The HMAC covers only the body, so a replayed valid body can arrive with any
+// header text. The delivery ID and event name reach the logs, so both must
+// match these patterns first. GitHub sends a UUID and a lowercase event name.
+var (
+	deliveryPattern = regexp.MustCompile(`^[0-9A-Za-z-]{1,64}$`)
+	eventPattern    = regexp.MustCompile(`^[a-z_]{1,64}$`)
+)
 
 // Handler serves GET /healthz and POST /webhook. Every other request, and a
 // non-POST request to /webhook, gets 404. It dispatches on the exact method
@@ -71,7 +80,10 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, log *sl
 	}
 
 	delivery := req.Header.Get("X-Github-Delivery")
-	if delivery == "" {
+	event := req.Header.Get("X-Github-Event")
+
+	if !deliveryPattern.MatchString(delivery) || !eventPattern.MatchString(event) {
+		log.WarnContext(req.Context(), "rejected delivery", "reason", "bad delivery or event header")
 		resp.WriteHeader(http.StatusBadRequest)
 
 		return
@@ -79,7 +91,7 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, log *sl
 
 	log.InfoContext(req.Context(), "accepted delivery",
 		"delivery", delivery,
-		"event", req.Header.Get("X-Github-Event"),
+		"event", event,
 		"bytes", size)
 	resp.WriteHeader(http.StatusAccepted)
 }

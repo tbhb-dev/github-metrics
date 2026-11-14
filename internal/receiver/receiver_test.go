@@ -123,6 +123,36 @@ func TestWebhook(t *testing.T) {
 			want:   http.StatusBadRequest,
 		},
 		{
+			name:   "missing event",
+			body:   body,
+			header: map[string]string{sigHeader: sign(testSecret, body), deliveryHeader: deliveryID},
+			want:   http.StatusBadRequest,
+		},
+		{
+			name: "event with a space",
+			body: body,
+			header: map[string]string{
+				sigHeader: sign(testSecret, body), deliveryHeader: deliveryID, eventHeader: "pull request",
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "event over 64 characters",
+			body: body,
+			header: map[string]string{
+				sigHeader: sign(testSecret, body), deliveryHeader: deliveryID, eventHeader: strings.Repeat("a", 65),
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "delivery id with a newline and text",
+			body: body,
+			header: map[string]string{
+				sigHeader: sign(testSecret, body), deliveryHeader: "d-1 secret=x", eventHeader: "ping",
+			},
+			want: http.StatusBadRequest,
+		},
+		{
 			name:   "too large",
 			body:   strings.Repeat("a", receiver.MaxBody+1),
 			header: map[string]string{sigHeader: sign(testSecret, body), deliveryHeader: deliveryID},

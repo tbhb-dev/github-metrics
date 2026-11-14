@@ -1,6 +1,6 @@
 # 6. Runtime view
 
-> Today versus design: the code has a webhook receiver and a GitHub client behind one request budget. The worker, the reconciler, the store, and the export remain design. Steps 3 to 6 are design. Steps 1 and 2 exist, and the receiver also requires `X-GitHub-Delivery`. It answers `400` without the header, and otherwise logs the delivery and answers `202`.
+> Today versus design: the code has a webhook receiver and a GitHub client behind one request budget. The worker, the reconciler, the store, and the export remain design. Steps 3 to 6 are design. Steps 1 and 2 exist, and the receiver also checks `X-GitHub-Delivery` and `X-GitHub-Event` against fixed patterns. It answers `400` when either is missing or malformed, and otherwise logs the delivery and answers `202`.
 
 ## Scenario: a webhook delivery
 
@@ -11,7 +11,7 @@
 5. Next, the worker fetches the current PR state with conditional requests and compares it with what the service already exported.
 6. Last, the worker exports spans that just completed. The store records their IDs only after the collector accepts them.
 
-Today the receiver answers `404` to every request except `GET /healthz` and `POST /webhook`. After a valid signature it answers `202`, or `400` when `X-GitHub-Delivery` is missing, and it answers `413` over the cap. It then stops. Steps 3 to 6 remain to build, along with the `405` and `415` checks and the `400` for a repeated delivery ID.
+Today the receiver answers `404` to every request except `GET /healthz` and `POST /webhook`. After a valid signature it answers `202`, or `400` when `X-GitHub-Delivery` or `X-GitHub-Event` is missing or malformed, and it answers `413` over the cap. It then stops. Steps 3 to 6 remain to build, along with the `405` and `415` checks and the `400` for a repeated delivery ID.
 
 ## Scenario: scheduled reconciliation
 
