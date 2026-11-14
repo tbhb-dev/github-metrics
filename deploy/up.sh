@@ -17,8 +17,12 @@
 # The script uses only grep and dirname besides the shell and docker.
 #
 # Nothing but `--pull never` may follow the image, so a caller can't change
-# the Compose file, the project or the environment after the check. A loaded
-# image has no registry to pull from, so an image id needs `--pull never`.
+# the Compose file, the project or the environment through arguments after the
+# check. The environment still reaches Compose: COMPOSE_PROJECT_NAME,
+# COMPOSE_ENV_FILES, COMPOSE_PROFILES, DOCKER_HOST, DOCKER_CONTEXT and
+# DOCKER_CONFIG all keep their effect, so the caller must control them. A
+# loaded image has no registry to pull from, so an image id needs
+# `--pull never`.
 #
 # Usage: deploy/up.sh <image> [--pull never]
 set -eu

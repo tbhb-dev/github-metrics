@@ -18,6 +18,7 @@ const (
 	digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	repo   = "ghcr.io/tbhb-dev/github-metrics"
 	pull   = "--pull"
+	never  = "never"
 )
 
 // result is what one run of up.sh left behind.
@@ -28,12 +29,21 @@ type result struct {
 	ran    bool
 }
 
-// runUp runs up.sh with the given arguments. PATH lists one directory, which
-// has a stub docker and links to the tools the script calls. The locale is
-// UTF-8, which the script has to override, so the host's shell settings can't
-// change the outcome. The stub records its arguments and the image variable in
-// a file, which shows whether the script got as far as running Compose.
+// runUp runs up.sh under /bin/sh.
 func runUp(t *testing.T, args ...string) result {
+	t.Helper()
+
+	return runIn(t, "/bin/sh", args...)
+}
+
+// runIn runs up.sh under the given shell with the given arguments. PATH lists
+// one directory, which has a stub docker and links to the tools the script
+// calls. The locale is
+// UTF-8, which the script has to override, so the host's shell settings can't
+// change the outcome. The stub records the image variable and each argument,
+// every one ended by a zero byte, in a file, which shows whether the script got as
+// far as running Compose.
+func runIn(t *testing.T, shell string, args ...string) result {
 	t.Helper()
 
 	if runtime.GOOS == "windows" {
@@ -42,7 +52,7 @@ func runUp(t *testing.T, args ...string) result {
 
 	dir := t.TempDir()
 	record := filepath.Join(dir, "record")
-	stub := "#!/bin/sh\n{ echo \"$GITHUB_METRICS_IMAGE\"; printf '%s\\n' \"$@\"; } > '" + record + "'\n"
+	stub := "#!/bin/sh\nprintf '%s\\0' \"$GITHUB_METRICS_IMAGE\" \"$@\" > '" + record + "'\n"
 
 	err := os.WriteFile(filepath.Join(dir, "docker"), []byte(stub), 0o700) //nolint:gosec // the stub must be executable
 	if err != nil {
@@ -64,7 +74,7 @@ func runUp(t *testing.T, args ...string) result {
 	}
 
 	argv := append([]string{"up.sh"}, args...)
-	cmd := exec.CommandContext(t.Context(), "/bin/sh", argv...)
+	cmd := exec.CommandContext(t.Context(), shell, argv...)
 	cmd.Env = []string{"PATH=" + dir, "LC_ALL=en_US.UTF-8"}
 
 	out, err := cmd.CombinedOutput()
@@ -89,11 +99,18 @@ func runUp(t *testing.T, args ...string) result {
 }
 
 // checkRan runs up.sh and expects it to hand docker the image in the
-// environment and exactly the Compose arguments, one per line.
+// environment and exactly the Compose arguments.
 func checkRan(t *testing.T, image string, args ...string) {
 	t.Helper()
 
-	res := runUp(t, append([]string{image}, args...)...)
+	checkRanIn(t, "/bin/sh", image, args...)
+}
+
+// checkRanIn expects the same under the given shell.
+func checkRanIn(t *testing.T, shell, image string, args ...string) {
+	t.Helper()
+
+	res := runIn(t, shell, append([]string{image}, args...)...)
 
 	if res.code != 0 || !res.ran {
 		t.Fatalf("up.sh %s: exit %d, ran=%v: %s", image, res.code, res.ran, res.output)
@@ -101,7 +118,7 @@ func checkRan(t *testing.T, image string, args ...string) {
 
 	want := append([]string{image, "compose", "-f", "./compose.yaml", "up", "-d"}, args...)
 
-	if got := strings.Split(strings.TrimSuffix(res.record, "\n"), "\n"); !slices.Equal(got, want) {
+	if got := strings.Split(strings.TrimSuffix(res.record, "\x00"), "\x00"); !slices.Equal(got, want) {
 		t.Errorf("docker saw %q, want %q", got, want)
 	}
 }
@@ -116,14 +133,12 @@ func TestUpAcceptsDigest(t *testing.T) {
 func TestUpAcceptsImageID(t *testing.T) {
 	t.Parallel()
 
-	checkRan(t, digest, pull, "never")
+	checkRan(t, digest, pull, never)
 }
 
-func TestUpRefusesOtherArguments(t *testing.T) {
-	t.Parallel()
-
-	image := repo + "@" + digest
-	argSets := map[string][]string{
+// refusedArgs lists what must not follow the image.
+func refusedArgs() map[string][]string {
+	return map[string][]string{
 		"other compose file": {"-f", "other.yaml"},
 		"project name":       {"-p", "other"},
 		"env file":           {"--env-file", "other.env"},
@@ -131,18 +146,69 @@ func TestUpRefusesOtherArguments(t *testing.T) {
 		"pull missing value": {pull},
 		"pull joined":        {"--pull=never"},
 		"pull in one word":   {"--pull never"},
-		"extra after pull":   {pull, "never", "--force-recreate"},
+		"extra after pull":   {pull, never, "--force-recreate"},
 		"extra option":       {"--wait"},
+		"empty argument":     {""},
+		"empty pull value":   {pull, ""},
+		"repeated pair":      {pull, never, pull, never},
+		"glob":               {"*"},
+		"double dash":        {"--"},
+		"double dash first":  {"--", pull, never},
+		"negation":           {"!"},
+		"negated pair":       {"!", never},
+		"test option":        {"-n"},
+		"test paren":         {"("},
+		"test and":           {"-a"},
 	}
+}
 
-	for name, args := range argSets {
+func TestUpRefusesOtherArguments(t *testing.T) {
+	t.Parallel()
+
+	image := repo + "@" + digest
+
+	for name, args := range refusedArgs() {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			res := runUp(t, append([]string{image}, args...)...)
+			checkRefused(t, "/bin/sh", append([]string{image}, args...)...)
+		})
+	}
+}
 
-			if res.code != 2 || res.ran {
-				t.Errorf("up.sh %q: exit %d, ran=%v, want exit 2 and no run: %s", args, res.code, res.ran, res.output)
+// checkRefused runs up.sh and expects it to exit 2 before it starts Compose.
+func checkRefused(t *testing.T, shell string, args ...string) {
+	t.Helper()
+
+	res := runIn(t, shell, args...)
+
+	if res.code != 2 || res.ran {
+		t.Errorf("%s up.sh %q: exit %d, ran=%v, want exit 2 and no run: %s", shell, args, res.code, res.ran, res.output)
+	}
+}
+
+// TestUpUnderOtherShells runs the same checks under the shells a deploy host
+// may use as /bin/sh. A shell that isn't installed is skipped.
+func TestUpUnderOtherShells(t *testing.T) {
+	t.Parallel()
+
+	image := repo + "@" + digest
+
+	for _, name := range []string{"bash", "dash", "ash"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			shell, err := exec.LookPath(name)
+			if err != nil {
+				t.Skipf("%s is not installed", name)
+			}
+
+			checkRanIn(t, shell, image)
+			checkRanIn(t, shell, digest, pull, never)
+			checkRefused(t, shell, repo+":latest")
+
+			for _, args := range refusedArgs() {
+				checkRefused(t, shell, append([]string{image}, args...)...)
 			}
 		})
 	}
