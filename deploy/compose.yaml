@@ -6,7 +6,7 @@
 # the published image with its digest (`ghcr.io/<owner>/github-metrics@sha256:...`,
 # from the publish workflow's job summary) or the id of a loaded image
 # (`sha256:...`) and refuses any other reference, a tag included. Compose alone
-# only refuses an unset GITHUB_METRICS_IMAGE.
+# only refuses an unset or empty GITHUB_METRICS_IMAGE.
 #
 # The service publishes no port. Whatever carries webhook deliveries to it
 # joins the `edge` network and reaches it at receiver:8080.
