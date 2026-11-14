@@ -1,4 +1,4 @@
-# B. App permissions and events
+# Appendix B: permissions, manifest keys, and events
 
 > Today versus design: this page describes the design. The code has a webhook receiver, a request budget, and a GitHub client, and nothing in it creates, installs, or checks a GitHub App. The wiki design says what follows, and this repo can't verify the live App, its installed permissions or subscriptions, or the webhook route.
 
@@ -14,7 +14,7 @@ Planned: the operator's App has every read-only permission GitHub offers for rep
 | Pull requests | Read | It covers the two subscribed events and every REST call the reconciler makes |
 | Every other repository and organization permission that offers read | Read | The operator wants broad read access for later telemetry, and no permission grants write |
 
-GitHub's permission tables put the list endpoints for pull requests (PRs), commits, reviews, and requested reviewers under Pull requests read. They list the issue timeline endpoint under either Issues read or Pull requests read, That means the timeline works without the Issues permission.
+GitHub's permission tables put the list endpoints for pull requests (PRs), commits, reviews, and requested reviewers under Pull requests read. They list the issue timeline endpoint under either Issues read or Pull requests read. That means the timeline works without the Issues permission.
 
 Today only the first two rows matter to the design. Each installation token request narrows to Metadata and Pull requests, and a later release may use the rest. Read access is broad, and it includes source code through Contents read and PR diffs through the PR and PR files endpoints. The design never calls those endpoints, as decision 0011 records. Decision 0012 covers what the service persists.
 
@@ -25,7 +25,7 @@ Today only the first two rows matter to the design. Each installation token requ
 | `pull_request` | `opened`, `closed`, `reopened`, `synchronize`, `review_requested`, `review_request_removed`, `ready_for_review`, `converted_to_draft` | Pull requests read | Lifecycle changes and review requests, as a prompt to reconcile |
 | `pull_request_review` | `submitted`, `dismissed` | Pull requests read | First review and approval milestones, as a prompt to reconcile |
 
-The planned worker ignores every other action of these events, such as `edited` or `labeled`. Each App also receives `installation` and `installation_repositories` by default without subscribing. The design uses an `installation_repositories` body that lists `repositories_added` to start a backfill of each newly added repository, as section 6 shows.
+The planned worker ignores every other action of these events, such as `edited` or `labeled`. Each App also receives `installation` and `installation_repositories` by default without subscribing (unverified: the wiki design states it without a GitHub citation). The design uses an `installation_repositories` body that lists `repositories_added` to start a backfill of each newly added repository, as section 6 shows.
 
 ## Deliberately excluded events (design)
 
@@ -42,7 +42,7 @@ A later subscription to an excluded event doesn't need a permission change, beca
 
 ## Manifest keys (design)
 
-The App manifest sets two keys. `default_permissions` lists every read-only permission for repositories and the organization, and `default_events` lists the two subscribed events. The manifest also sets `public` to `false` and puts the webhook URL of the planned public tunnel route under `hook_attributes`.
+The App manifest sets two keys. `default_permissions` lists every read-only permission for repositories and the organization, and `default_events` lists the two subscribed events. The wiki design gives these 47 key names but no source page, and nobody has checked them against GitHub's "Permissions required for GitHub Apps" reference yet, so treat them as unverified. The manifest also sets `public` to `false` and puts the webhook URL of the planned public tunnel route under `hook_attributes`.
 
 ```json
 {
