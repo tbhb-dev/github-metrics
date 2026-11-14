@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Tony Burns
+
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@tbhb_rules//repo:defs.bzl", "repo_files")
+
+repo_files()
+
+go_library(
+    name = "github-metrics_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/tbhb-dev/github-metrics/cmd/github-metrics",
+    visibility = ["//:__pkg__"],
+    deps = ["//internal/receiver"],
+)
+
+go_binary(
+    name = "github-metrics",
+    embed = [":github-metrics_lib"],
+    visibility = ["//visibility:public"],
+)

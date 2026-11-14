@@ -34,6 +34,7 @@ delenv
 depguard
 depscan
 direnv
+distroless
 docstrings
 dunder
 dupl
@@ -51,6 +52,7 @@ frontmatter
 fsfe
 funlen
 genrule
+github-metrics
 gobco
 gochecknoglobals
 gochecknoinits
@@ -67,7 +69,6 @@ golangci
 golines
 gomod
 gomodguard
-github-metrics
 gomutants
 goproxy
 gosec
@@ -75,6 +76,8 @@ govet
 govulncheck
 gpgsign
 hardwrap
+healthcheck
+healthz
 heapdump
 heredocs
 hermeticity
@@ -113,6 +116,7 @@ nogo
 nohup
 nolint
 nolintlint
+nonroot
 nonstrings
 noremote
 nosandbox
@@ -173,6 +177,7 @@ testpaths
 tombi
 toolu
 tricolon
+trimpath
 ufffd
 uncomparables
 underef

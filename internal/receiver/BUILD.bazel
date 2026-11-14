@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Tony Burns
+
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+load("@tbhb_rules//repo:defs.bzl", "repo_files")
+
+repo_files()
+
+go_library(
+    name = "receiver",
+    srcs = ["receiver.go"],
+    importpath = "github.com/tbhb-dev/github-metrics/internal/receiver",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "receiver_test",
+    srcs = ["receiver_test.go"],
+    visibility = ["//:__pkg__"],
+    deps = [":receiver"],
+)

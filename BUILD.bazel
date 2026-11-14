@@ -99,6 +99,9 @@ nogo(
 # runs per package as an aspect, over export data, and fails if any Go file of
 # the tree is never linted.
 GO_TARGETS = [
+    "//cmd/github-metrics:github-metrics_lib",
+    "//internal/receiver",
+    "//internal/receiver:receiver_test",
     "//internal/version",
     "//internal/version:version_test",
 ]
@@ -111,7 +114,8 @@ golangci_lint_test(
 
 # go mod tidy, mutation and condition-coverage checks need a module proxy
 # directory built from go.sum, which has nothing to list until the first
-# dependency lands. The receiver pull request adds them.
+# dependency lands. The receiver uses only the standard library, so they
+# arrive with the first dependency.
 
 # Every file of the repository, for the whole-tree checks below. Each package
 # calls repo_files() too, so the chain covers the tree. Directories that hold
