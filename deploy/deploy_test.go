@@ -87,6 +87,22 @@ func TestUpAcceptsDigest(t *testing.T) {
 	}
 }
 
+// TestUpAcceptsImageID covers the form a classic image store needs.
+func TestUpAcceptsImageID(t *testing.T) {
+	t.Parallel()
+
+	res := runUp(t, digest, "--pull", "never")
+
+	if res.code != 0 || !res.ran {
+		t.Fatalf("up.sh %s: exit %d, ran=%v: %s", digest, res.code, res.ran, res.output)
+	}
+
+	if !strings.HasPrefix(res.record, digest+"|compose -f ") ||
+		!strings.HasSuffix(strings.TrimSpace(res.record), "compose.yaml up -d --pull never") {
+		t.Errorf("docker saw %q", res.record)
+	}
+}
+
 func TestUpRefusesOtherReferences(t *testing.T) {
 	t.Parallel()
 
@@ -109,6 +125,14 @@ func TestUpRefusesOtherReferences(t *testing.T) {
 		"tab":              repo + "\t@" + digest,
 		"vertical tab":     repo + "\v@" + digest,
 		"form feed":        repo + "\f@" + digest,
+		"id short":         "sha256:abc",
+		"id upper":         "sha256:" + strings.Repeat("A", 64),
+		"id not hex":       "sha256:" + strings.Repeat("g", 64),
+		"id too long":      digest + "0",
+		"id no prefix":     strings.TrimPrefix(digest, "sha256:"),
+		"id empty":         "sha256:",
+		"id glued to name": "github-metrics" + digest,
+		"id with newline":  digest + "\n",
 	}
 
 	for name, image := range refs {
