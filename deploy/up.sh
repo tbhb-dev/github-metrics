@@ -14,6 +14,8 @@
 # re-keys an image on `docker load`, so the digest reference no longer
 # resolves and the image runs by its id.
 #
+# The script uses only grep and dirname besides the shell and docker.
+#
 # Usage: deploy/up.sh <image> [docker compose up arguments]
 set -eu
 
