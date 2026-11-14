@@ -9,4 +9,4 @@
 | Metrics count once | The worker commits each milestone to the store before it records the observation |
 | Bounded request volume | One shared token bucket serves every caller in priority order, and conditional requests make unchanged answers free |
 | Bounded memory | The receiver streams each body into the signature hash and never buffers it |
-| Logs follow the standard path | The service exports logs to the same collector endpoint as its traces and metrics, and also writes JSON to standard output |
+| Logs follow the standard path | The design exports logs to the same collector endpoint as traces and metrics, and also writes JSON to standard output. Today only the JSON output exists |

@@ -7,8 +7,8 @@ Diagram file: `diagrams/structurizr-Containers.svg`, from the Bazel target.
 | Container | Responsibility |
 | --- | --- |
 | Tunnel connector | Public entry for `POST /webhook`. Outbound connections only |
-| Service | The Go binary with the receiver, the worker, and the reconciler |
-| State store | One `bbolt` file with the delivery queue, the dedupe table, exported span IDs, metric milestones, watermarks, and entity tags |
+| Service | The Go binary. Today it has the receiver, and the design adds the worker and the reconciler |
+| State store | Planned, with no store in the code yet. One `bbolt` file would hold the delivery queue, the dedupe table, watermarks, entity tags, and the state for exported span IDs and metric milestones |
 
 ## Level 2: the service
 

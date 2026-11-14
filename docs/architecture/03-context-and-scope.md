@@ -16,7 +16,7 @@ Diagram: `diagrams/structurizr-SystemContext.svg`, generated from `workspace.dsl
 | `POST /webhook` | HTTPS through the tunnel | Signed with `X-Hub-Signature-256`, at most 25 MiB |
 | `GET /healthz` | HTTP on the host | Liveness |
 | GitHub REST | HTTPS | Bearer installation token, `ETag` conditional requests |
-| OpenTelemetry export | HTTP with protobuf | Traces, metrics, and logs to the host collector on port 4318 |
+| OpenTelemetry export | HTTP with protobuf | Planned: traces, metrics, and logs to the host collector on port 4318. The code exports nothing yet |
 
 ## Scope
 
