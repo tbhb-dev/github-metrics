@@ -31,6 +31,23 @@ func sign(secret, body string) string {
 	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }
 
+// tamper flips one hex digit of the digest in signature, at index pos, where
+// a negative pos counts from the end.
+func tamper(signature string, pos int) string {
+	digits := []byte(strings.TrimPrefix(signature, "sha256="))
+	if pos < 0 {
+		pos += len(digits)
+	}
+
+	if digits[pos] == '0' {
+		digits[pos] = '1'
+	} else {
+		digits[pos] = '0'
+	}
+
+	return "sha256=" + string(digits)
+}
+
 func do(t *testing.T, secret, method, path, body string, header map[string]string) int {
 	t.Helper()
 
@@ -108,7 +125,7 @@ func TestWebhook(t *testing.T) {
 		{
 			name:   "too large",
 			body:   strings.Repeat("a", receiver.MaxBody+1),
-			header: map[string]string{sigHeader: "sha256=00", deliveryHeader: deliveryID},
+			header: map[string]string{sigHeader: sign(testSecret, body), deliveryHeader: deliveryID},
 			want:   http.StatusRequestEntityTooLarge,
 		},
 	}
@@ -120,6 +137,38 @@ func TestWebhook(t *testing.T) {
 			got := do(t, testSecret, http.MethodPost, "/webhook", spec.body, spec.header)
 			if got != spec.want {
 				t.Errorf("status = %d, want %d", got, spec.want)
+			}
+		})
+	}
+}
+
+func TestBadSignature(t *testing.T) {
+	t.Parallel()
+
+	const body = `{"action":"opened"}`
+
+	good := sign(testSecret, body)
+	tests := map[string]string{
+		"bad signature and no delivery id": "", // set below
+		"first digest byte differs":        tamper(good, 0),
+		"last digest byte differs":         tamper(good, -1),
+		"digest truncated":                 good[:len(good)-2],
+		"digest extended":                  good + "00",
+	}
+	tests["bad signature and no delivery id"] = sign("other", body)
+
+	for name, signature := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			header := map[string]string{sigHeader: signature}
+			if name != "bad signature and no delivery id" {
+				header[deliveryHeader] = deliveryID
+			}
+
+			got := do(t, testSecret, http.MethodPost, "/webhook", body, header)
+			if got != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401", got)
 			}
 		})
 	}
@@ -148,6 +197,9 @@ func TestRouting(t *testing.T) {
 		{http.MethodGet, "/", http.StatusNotFound},
 		{http.MethodGet, "/other", http.StatusNotFound},
 		{http.MethodPost, "/healthz", http.StatusNotFound},
+		{http.MethodPost, "//webhook", http.StatusNotFound},
+		{http.MethodPost, "/webhook/", http.StatusNotFound},
+		{http.MethodGet, "/webhook/../healthz", http.StatusNotFound},
 	}
 
 	for _, spec := range tests {

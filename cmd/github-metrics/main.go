@@ -28,10 +28,11 @@ import (
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
 )
 
+// The write timeout covers the body read, so it must exceed the read timeout.
 const (
 	headerTimeout   = 5 * time.Second
 	readTimeout     = 30 * time.Second
-	writeTimeout    = 10 * time.Second
+	writeTimeout    = 40 * time.Second
 	idleTimeout     = 60 * time.Second
 	shutdownTimeout = 10 * time.Second
 	probeTimeout    = 3 * time.Second
