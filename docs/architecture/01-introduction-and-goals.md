@@ -8,7 +8,7 @@ Today nobody can see how long a pull request (PR) waits for review or merge, or 
 | --- | --- |
 | One trace per PR | The trace runs from creation to the first merge or close, with child spans for commits, review requests, reviews, reopens, and closes |
 | Timing metrics | Time from opening a pull request to its first review, and separately to its approval and its merge. Each has a repository label and an author type label |
-| No missed activity | Scheduled reconciliation heals every missed webhook |
+| No missed activity | Planned: scheduled reconciliation heals every missed webhook |
 | No private content | Titles, bodies, comment text, and diffs never leave the service |
 
 ## Quality goals
@@ -16,5 +16,5 @@ Today nobody can see how long a pull request (PR) waits for review or merge, or 
 | Goal | Scenario |
 | --- | --- |
 | Correctness | GitHub sends a delivery twice, or never. The service exports the same spans and metrics as if it had arrived once. |
-| Restraint | A backfill runs while webhooks arrive. Requests to GitHub stay under the shared budget, and webhook-driven work goes first. |
+| Restraint | The design lets a backfill run while webhooks arrive. Requests to GitHub stay under the shared budget, and webhook-driven work goes first. |
 | Safety | A request arrives with a bad signature. The service answers `401` and leaves its state unchanged. |

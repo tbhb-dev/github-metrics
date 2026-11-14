@@ -2,8 +2,8 @@
 
 | Goal | Approach |
 | --- | --- |
-| Telemetry doesn't depend on a delivery | A webhook only triggers a reconcile. Telemetry comes from REST responses that show the PR's current state |
-| Missed deliveries heal | A 15-minute incremental run and a nightly pass over open PRs reconcile the same way a delivery does |
+| Telemetry doesn't depend on a delivery | The design has a webhook trigger a reconcile, with telemetry drawn from REST responses that show the PR's current state. No code does this yet |
+| Missed deliveries heal | Planned: a 15-minute incremental run and a nightly pass over open PRs reconcile the same way a delivery does |
 | Replays and reruns are safe | Trace and span IDs derive from a hash of the PR's node ID, and every run produces the same IDs. The store keeps the exported span IDs |
 | Spans have real times | Span times come from GitHub's own timestamps |
 | Metrics count once | The worker commits each milestone to the store before it records the observation |
