@@ -4,7 +4,7 @@
 package deploy_test
 
 import (
-	"fmt"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,13 +13,29 @@ import (
 	"testing"
 )
 
-const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const (
+	digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	repo   = "ghcr.io/tbhb-dev/github-metrics"
+)
 
-// stubDocker writes a fake docker that records its arguments and the image
-// variable in a file, so a test can see whether the script got as far as
-// running Compose. It returns the stub's directory and the record's path.
-func stubDocker(t *testing.T) (string, string) {
+// result is what one run of up.sh left behind.
+type result struct {
+	output string
+	record string
+	code   int
+	ran    bool
+}
+
+// runUp runs up.sh with the given arguments, a stub docker first on PATH and
+// nothing else inherited, so the host's shell settings and locale can't change
+// the outcome. The stub records its arguments and the image variable in a
+// file, which shows whether the script got as far as running Compose.
+func runUp(t *testing.T, args ...string) result {
 	t.Helper()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("the script needs a POSIX shell")
+	}
 
 	dir := t.TempDir()
 	record := filepath.Join(dir, "record")
@@ -30,47 +46,44 @@ func stubDocker(t *testing.T) (string, string) {
 		t.Fatal(err)
 	}
 
-	return dir, record
-}
-
-func runUp(t *testing.T, image string) (string, error) {
-	t.Helper()
-
-	if runtime.GOOS == "windows" {
-		t.Skip("the script needs a POSIX shell")
-	}
-
-	dir, record := stubDocker(t)
-	cmd := exec.CommandContext(t.Context(), "sh", "up.sh", image)
-
-	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	argv := append([]string{"up.sh"}, args...)
+	cmd := exec.CommandContext(t.Context(), "/bin/sh", argv...)
+	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "LC_ALL=C"}
 
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), fmt.Errorf("up.sh: %w", err)
+	res := result{output: string(out), record: "", code: 0, ran: false}
+
+	var exitErr *exec.ExitError
+
+	switch {
+	case errors.As(err, &exitErr):
+		res.code = exitErr.ExitCode()
+	case err != nil:
+		t.Fatal(err)
 	}
 
 	got, readErr := os.ReadFile(record)
-	if readErr != nil {
-		t.Fatal(readErr)
+	if readErr == nil {
+		res.ran = true
+		res.record = string(got)
 	}
 
-	return string(got), nil
+	return res
 }
 
 func TestUpAcceptsDigest(t *testing.T) {
 	t.Parallel()
 
-	image := "ghcr.io/tbhb-dev/github-metrics@" + digest
+	image := repo + "@" + digest
+	res := runUp(t, image)
 
-	got, err := runUp(t, image)
-	if err != nil {
-		t.Fatalf("up.sh %s: %v: %s", image, err, got)
+	if res.code != 0 || !res.ran {
+		t.Fatalf("up.sh %s: exit %d, ran=%v: %s", image, res.code, res.ran, res.output)
 	}
 
-	if !strings.HasPrefix(got, image+"|compose -f ") ||
-		!strings.HasSuffix(strings.TrimSpace(got), "compose.yaml up -d") {
-		t.Errorf("docker saw %q", got)
+	if !strings.HasPrefix(res.record, image+"|compose -f ") ||
+		!strings.HasSuffix(strings.TrimSpace(res.record), "compose.yaml up -d") {
+		t.Errorf("docker saw %q", res.record)
 	}
 }
 
@@ -79,27 +92,49 @@ func TestUpRefusesOtherReferences(t *testing.T) {
 
 	refs := map[string]string{
 		"empty":            "",
-		"tag":              "ghcr.io/tbhb-dev/github-metrics:sha-abc",
-		"latest":           "ghcr.io/tbhb-dev/github-metrics:latest",
-		"trailing text":    "ghcr.io/tbhb-dev/github-metrics@" + digest + "x",
-		"short digest":     "ghcr.io/tbhb-dev/github-metrics@sha256:abc",
-		"upper digest":     "ghcr.io/tbhb-dev/github-metrics@sha256:" + strings.Repeat("A", 64),
-		"other algorithm":  "ghcr.io/tbhb-dev/github-metrics@sha512:" + strings.Repeat("a", 64),
+		"tag":              repo + ":sha-abc",
+		"latest":           repo + ":latest",
+		"tag and digest":   repo + ":v1@" + digest,
+		"leading dash":     "-" + repo + "@" + digest,
+		"registry port":    "localhost:5000/github-metrics@" + digest,
+		"short digest":     repo + "@sha256:abc",
+		"upper digest":     repo + "@sha256:" + strings.Repeat("A", 64),
+		"other algorithm":  repo + "@sha512:" + strings.Repeat("a", 64),
 		"no name":          "@" + digest,
-		"embedded newline": "ghcr.io/tbhb-dev/github-metrics:latest\nghcr.io/tbhb-dev/github-metrics@" + digest,
-		"trailing newline": "ghcr.io/tbhb-dev/github-metrics@" + digest + "\n",
-		"space":            "ghcr.io/tbhb-dev/github-metrics @" + digest,
+		"trailing text":    repo + "@" + digest + "x",
+		"space":            repo + " @" + digest,
+		"embedded newline": repo + ":latest\n" + repo + "@" + digest,
+		"trailing newline": repo + "@" + digest + "\n",
+		"carriage return":  repo + "@" + digest + "\r",
+		"tab":              repo + "\t@" + digest,
+		"vertical tab":     repo + "\v@" + digest,
+		"form feed":        repo + "\f@" + digest,
 	}
 
 	for name, image := range refs {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := runUp(t, image)
-			if err == nil {
-				t.Errorf("up.sh %q succeeded and ran docker: %q", image, got)
+			res := runUp(t, image)
+
+			if res.code != 2 {
+				t.Errorf("up.sh %q: exit %d, want 2: %s", image, res.code, res.output)
+			}
+
+			if res.ran {
+				t.Errorf("up.sh %q ran docker: %q", image, res.record)
 			}
 		})
+	}
+}
+
+func TestUpRefusesNoArgument(t *testing.T) {
+	t.Parallel()
+
+	res := runUp(t)
+
+	if res.code != 2 || res.ran {
+		t.Errorf("up.sh with no argument: exit %d, ran=%v, want exit 2 and no run: %s", res.code, res.ran, res.output)
 	}
 }
 

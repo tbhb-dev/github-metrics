@@ -4,7 +4,9 @@
 #
 # Starts the receiver from an image that names its digest. Compose can't
 # check the form of a variable's value, so this script refuses any image
-# reference that isn't `<name>@sha256:<64 hex digits>`, such as a tag.
+# reference that isn't `<name>@sha256:<64 hex digits>`. A name starts with a
+# letter or digit and holds lowercase letters, digits and `._/-`, so a tag, a
+# registry port and a leading dash are all refused.
 #
 # Usage: deploy/up.sh <image> [docker compose up arguments]
 set -eu
@@ -19,7 +21,7 @@ case $image in
   ;;
 esac
 
-if ! printf '%s\n' "$image" | grep -Eq '^[^@]+@sha256:[0-9a-f]{64}$'; then
+if ! printf '%s\n' "$image" | grep -Eq '^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$'; then
   echo "up.sh: the image must be <name>@sha256:<64 hex digits>, got '$image'" >&2
   exit 2
 fi
