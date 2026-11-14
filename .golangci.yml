@@ -106,6 +106,7 @@ linters:
       ignore-patterns:
         - 'github\.com/spf13/cobra\.Command$'
         - 'runtime/debug\..+'
+        - 'net/http\.Response$'
 
     funlen:
       lines: 100
