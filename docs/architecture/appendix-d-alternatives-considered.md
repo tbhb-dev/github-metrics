@@ -20,7 +20,7 @@ Each section below covers one option the design didn't take, and why. A section 
 
 ## A stateless service
 
-The design could have the service re-derive everything from GitHub on each pass and not store anything between passes. OpenTelemetry (OTel) backends don't reliably drop a span exported twice, and a histogram counts every observation, so each pass would double the metrics. A mounted volume with one `bbolt` file needs a few megabytes and keeps the root filesystem read-only. [D4](decisions/0004-the-service-stores-its-state-in-a-small-bbolt-fi.md) records the stored-state choice.
+The design could have the service re-derive everything from GitHub on each pass and not store anything between passes. The design can't rely on OpenTelemetry (OTel) backends to drop a span exported twice, and a histogram counts every observation. Each pass would double the metrics. A mounted volume with one `bbolt` file needs a few megabytes and keeps the root filesystem read-only. [D4](decisions/0004-the-service-stores-its-state-in-a-small-bbolt-fi.md) records the stored-state choice.
 
 ## SQLite instead of `bbolt`
 
@@ -44,7 +44,7 @@ The OpenTelemetry Protocol (OTLP) over gRPC streams well and is the collector's 
 
 ## The collector's own GitHub receiver
 
-The OTel Collector has a contributed GitHub receiver that scrapes repository metrics and can take webhooks. Its metrics are per-change gauges, not histograms per repository. As far as the design knows, it builds no deterministic PR lifecycle trace, and that claim is unverified. A small dedicated service fits the trace model and the idempotency rules better.
+The OTel Collector has a contributed GitHub receiver that scrapes repository metrics and can take webhooks. Its metrics are per-change gauges, not histograms per repository (unverified: the design doesn't cite a source for this). As far as the design knows, it builds no deterministic PR lifecycle trace, and that claim is unverified. A small dedicated service fits the trace model and the idempotency rules better.
 
 ## The redelivery API as a healer
 
@@ -56,7 +56,7 @@ Per-author histograms would show who waits longest. Public repositories accept P
 
 ## Re-exporting the root after a reopen
 
-The root could go out again with the same IDs and a later end time each time a reopened PR changes state. That relies on how each backend treats two spans with one ID, which the design hasn't checked. The stateless option earlier in this appendix notes that backends don't reliably drop a repeat. Child spans for the reopen and the later close or merge record the same facts without a duplicate root.
+The root could go out again with the same IDs and a later end time each time a reopened PR changes state. That relies on how each backend treats two spans with one ID, which the design hasn't checked. The stateless option earlier in this appendix makes the same point: the design can't rely on backends dropping a repeat. Child spans for the reopen and the later close or merge record the same facts without a duplicate root.
 
 ## Webhook payloads as a telemetry source
 
