@@ -26,10 +26,11 @@ type result struct {
 	ran    bool
 }
 
-// runUp runs up.sh with the given arguments, a stub docker first on PATH and
-// nothing else inherited, so the host's shell settings and locale can't change
-// the outcome. The stub records its arguments and the image variable in a
-// file, which shows whether the script got as far as running Compose.
+// runUp runs up.sh with the given arguments. PATH lists one directory, which
+// has a stub docker and links to the tools the script calls. The locale is
+// UTF-8, which the script has to override, so the host's shell settings can't
+// change the outcome. The stub records its arguments and the image variable in
+// a file, which shows whether the script got as far as running Compose.
 func runUp(t *testing.T, args ...string) result {
 	t.Helper()
 
@@ -46,9 +47,23 @@ func runUp(t *testing.T, args ...string) result {
 		t.Fatal(err)
 	}
 
+	// The script may call only these tools, so a new one is added here and in
+	// the script's header on purpose.
+	for _, tool := range []string{"grep", "dirname"} {
+		path, lookErr := exec.LookPath(tool)
+		if lookErr != nil {
+			t.Fatal(lookErr)
+		}
+
+		linkErr := os.Symlink(path, filepath.Join(dir, tool))
+		if linkErr != nil {
+			t.Fatal(linkErr)
+		}
+	}
+
 	argv := append([]string{"up.sh"}, args...)
 	cmd := exec.CommandContext(t.Context(), "/bin/sh", argv...)
-	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "LC_ALL=C"}
+	cmd.Env = []string{"PATH=" + dir, "LC_ALL=en_US.UTF-8"}
 
 	out, err := cmd.CombinedOutput()
 	res := result{output: string(out), record: "", code: 0, ran: false}
@@ -71,20 +86,34 @@ func runUp(t *testing.T, args ...string) result {
 	return res
 }
 
-func TestUpAcceptsDigest(t *testing.T) {
-	t.Parallel()
+// checkRan runs up.sh and expects it to hand image and the compose arguments to
+// docker.
+func checkRan(t *testing.T, image, suffix string, args ...string) {
+	t.Helper()
 
-	image := repo + "@" + digest
-	res := runUp(t, image)
+	res := runUp(t, append([]string{image}, args...)...)
 
 	if res.code != 0 || !res.ran {
 		t.Fatalf("up.sh %s: exit %d, ran=%v: %s", image, res.code, res.ran, res.output)
 	}
 
 	if !strings.HasPrefix(res.record, image+"|compose -f ") ||
-		!strings.HasSuffix(strings.TrimSpace(res.record), "compose.yaml up -d") {
+		!strings.HasSuffix(strings.TrimSpace(res.record), suffix) {
 		t.Errorf("docker saw %q", res.record)
 	}
+}
+
+func TestUpAcceptsDigest(t *testing.T) {
+	t.Parallel()
+
+	checkRan(t, repo+"@"+digest, "compose.yaml up -d")
+}
+
+// TestUpAcceptsImageID covers the form a classic image store needs.
+func TestUpAcceptsImageID(t *testing.T) {
+	t.Parallel()
+
+	checkRan(t, digest, "compose.yaml up -d --pull never", "--pull", "never")
 }
 
 func TestUpRefusesOtherReferences(t *testing.T) {
@@ -109,6 +138,25 @@ func TestUpRefusesOtherReferences(t *testing.T) {
 		"tab":              repo + "\t@" + digest,
 		"vertical tab":     repo + "\v@" + digest,
 		"form feed":        repo + "\f@" + digest,
+		"trailing slash":   repo + "/@" + digest,
+		"empty component":  "ghcr.io//github-metrics@" + digest,
+		"dot component":    "ghcr.io/./github-metrics@" + digest,
+		"parent component": "ghcr.io/../github-metrics@" + digest,
+		"leading dot":      ".github-metrics@" + digest,
+		"trailing dot":     "github-metrics.@" + digest,
+		"double dot":       "github..metrics@" + digest,
+		"trailing dash":    "github-metrics-@" + digest,
+		"leading slash":    "/github-metrics@" + digest,
+		"uppercase name":   "GHCR.io/tbhb-dev/github-metrics@" + digest,
+		"non-ASCII name":   repo + string(rune(0xe9)) + "@" + digest,
+		"id short":         "sha256:abc",
+		"id upper":         "sha256:" + strings.Repeat("A", 64),
+		"id not hex":       "sha256:" + strings.Repeat("g", 64),
+		"id too long":      digest + "0",
+		"id no prefix":     strings.TrimPrefix(digest, "sha256:"),
+		"id empty":         "sha256:",
+		"id glued to name": "github-metrics" + digest,
+		"id with newline":  digest + "\n",
 	}
 
 	for name, image := range refs {

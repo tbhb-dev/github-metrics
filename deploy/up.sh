@@ -4,12 +4,24 @@
 #
 # Starts the receiver from an image that names its digest. Compose can't
 # check the form of a variable's value, so this script refuses any image
-# reference that isn't `<name>@sha256:<64 hex digits>`. A name starts with a
-# letter or digit and holds lowercase letters, digits and `._/-`, so a tag, a
-# registry port and a leading dash are all refused.
+# reference that isn't `<name>@sha256:<64 hex digits>` or `sha256:<64 hex
+# digits>`. A name is one or more `/`-separated components. A component is
+# runs of lowercase letters and digits joined by `.`, `_`, `__` or dashes, so
+# a tag, a registry port, a leading dash, an empty component and `.` or `..`
+# are all refused.
+#
+# The second form is the image id. A host with the classic Docker image store
+# re-keys an image on `docker load`, so the digest reference no longer
+# resolves and the image runs by its id.
+#
+# The script uses only grep and dirname besides the shell and docker.
 #
 # Usage: deploy/up.sh <image> [docker compose up arguments]
 set -eu
+
+# The character classes below mean ASCII only, whatever the caller's locale.
+LC_ALL=C
+export LC_ALL
 
 image=${1:-}
 
@@ -21,8 +33,8 @@ case $image in
   ;;
 esac
 
-if ! printf '%s\n' "$image" | grep -Eq '^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$'; then
-  echo "up.sh: the image must be <name>@sha256:<64 hex digits>, got '$image'" >&2
+if ! printf '%s\n' "$image" | grep -Eq '^([a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(/[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*)*@)?sha256:[0-9a-f]{64}$'; then
+  echo "up.sh: the image must be <name>@sha256:<64 hex digits> or sha256:<64 hex digits>, got '$image'" >&2
   exit 2
 fi
 
