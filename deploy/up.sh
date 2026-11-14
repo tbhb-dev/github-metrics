@@ -17,6 +17,10 @@
 # Usage: deploy/up.sh <image> [docker compose up arguments]
 set -eu
 
+# The character classes below mean ASCII only, whatever the caller's locale.
+LC_ALL=C
+export LC_ALL
+
 image=${1:-}
 
 # case sees the whole string, so a newline can't hide a second line from grep.

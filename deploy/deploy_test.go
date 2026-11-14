@@ -27,9 +27,10 @@ type result struct {
 }
 
 // runUp runs up.sh with the given arguments, a stub docker first on PATH and
-// nothing else inherited, so the host's shell settings and locale can't change
-// the outcome. The stub records its arguments and the image variable in a
-// file, which shows whether the script got as far as running Compose.
+// nothing else inherited. The locale is UTF-8, which the script has to
+// override, so the host's shell settings can't change the outcome. The stub
+// records its arguments and the image variable in a file, which shows whether
+// the script got as far as running Compose.
 func runUp(t *testing.T, args ...string) result {
 	t.Helper()
 
@@ -48,7 +49,7 @@ func runUp(t *testing.T, args ...string) result {
 
 	argv := append([]string{"up.sh"}, args...)
 	cmd := exec.CommandContext(t.Context(), "/bin/sh", argv...)
-	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "LC_ALL=C"}
+	cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin", "LC_ALL=en_US.UTF-8"}
 
 	out, err := cmd.CombinedOutput()
 	res := result{output: string(out), record: "", code: 0, ran: false}
@@ -134,6 +135,8 @@ func TestUpRefusesOtherReferences(t *testing.T) {
 		"double dot":       "github..metrics@" + digest,
 		"trailing dash":    "github-metrics-@" + digest,
 		"leading slash":    "/github-metrics@" + digest,
+		"uppercase name":   "GHCR.io/tbhb-dev/github-metrics@" + digest,
+		"non-ASCII name":   "ghcr.io/tbhb-dev/github-métrics@" + digest,
 		"id short":         "sha256:abc",
 		"id upper":         "sha256:" + strings.Repeat("A", 64),
 		"id not hex":       "sha256:" + strings.Repeat("g", 64),
