@@ -21,7 +21,7 @@ The service is under construction. Each page says what exists on main and what t
 
 ## Diagrams
 
-`workspace.dsl` is the source. A Bazel target validates it, then writes `workspace.json` here and the images to `diagrams/`. Nobody edits those outputs by hand. The pages link these expected files, which don't exist until that target merges:
+`workspace.dsl` is the source. The operator plans a Bazel target to check it, then write `workspace.json` here and the images to `diagrams/`. That target hasn't merged, so none of these outputs exist yet. Once it does, nobody edits them by hand. The pages link these expected files:
 
 - `diagrams/structurizr-SystemContext.svg`
 - `diagrams/structurizr-Containers.svg`

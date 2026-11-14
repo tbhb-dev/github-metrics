@@ -1,6 +1,6 @@
 # 6. Runtime view
 
-> Today versus design: the code has a webhook receiver and a GitHub client behind one request budget. The worker, the reconciler, the store, and the export remain design. Every step after the signature check is design.
+> Today versus design: the code has a webhook receiver and a GitHub client behind one request budget. The worker, the reconciler, the store, and the export remain design. Steps 3 to 6 are design. Steps 1 and 2 exist, and the receiver also requires `X-GitHub-Delivery`. It answers `400` without the header, and otherwise logs the delivery and answers `202`.
 
 ## Scenario: a webhook delivery
 

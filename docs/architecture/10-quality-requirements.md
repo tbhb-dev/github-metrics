@@ -1,5 +1,7 @@
 # 10. Quality requirements
 
+> Today versus design: these are targets. The code can't yet meet most of them.
+
 | Quality | Scenario | Measure |
 | --- | --- | --- |
 | Correctness | A delivery arrives twice, late, or never | The reconciled telemetry is the same in all three cases |

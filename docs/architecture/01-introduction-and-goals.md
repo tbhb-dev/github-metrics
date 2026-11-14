@@ -13,6 +13,8 @@ Today nobody can see how long a pull request (PR) waits for review or merge, or 
 
 ## Quality goals
 
+These goals describe the finished service. The code is far from most of them.
+
 | Goal | Scenario |
 | --- | --- |
 | Correctness | GitHub sends a delivery twice, or never. The service exports the same spans and metrics as if it had arrived once. |

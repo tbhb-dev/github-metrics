@@ -1,6 +1,6 @@
 # 9. Architecture decisions
 
-Each decision has its own record under `decisions/`, with its rule, how to undo it, and its status.
+Each decision has its own record under `decisions/`, with its rule, how to undo it, and its status. A rule states the decided design. Today the code covers only the receiver, the request budget, and the GitHub client, and the live App and tunnel route are the operator's to verify.
 
 | Record | Decision |
 | --- | --- |

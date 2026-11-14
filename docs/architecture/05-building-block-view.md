@@ -2,7 +2,7 @@
 
 ## Level 1: containers
 
-Diagram file: `diagrams/structurizr-Containers.svg`, from the Bazel target.
+Expected diagram, not yet generated: `diagrams/structurizr-Containers.svg`, from the Bazel target.
 
 | Container | Responsibility |
 | --- | --- |
@@ -12,7 +12,7 @@ Diagram file: `diagrams/structurizr-Containers.svg`, from the Bazel target.
 
 ## Level 2: the service
 
-Diagram file: `diagrams/structurizr-Components.svg`, from the Bazel target.
+Expected diagram, not yet generated: `diagrams/structurizr-Components.svg`, from the Bazel target.
 
 | Component | Package | Status |
 | --- | --- | --- |

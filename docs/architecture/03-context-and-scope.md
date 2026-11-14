@@ -2,7 +2,7 @@
 
 > Today versus design: the code has a webhook receiver and a GitHub client behind one request budget. The worker, the reconciler, the store, and the export remain design. This page shows the rest as design.
 
-Diagram: `diagrams/structurizr-SystemContext.svg`, generated from `workspace.dsl`.
+Expected diagram, not yet generated: `diagrams/structurizr-SystemContext.svg`, from `workspace.dsl`.
 
 ## Business context
 
@@ -17,7 +17,7 @@ Diagram: `diagrams/structurizr-SystemContext.svg`, generated from `workspace.dsl
 | --- | --- | --- |
 | `POST /webhook` | HTTPS through the tunnel | Signed with `X-Hub-Signature-256`, at most 25 MiB |
 | `GET /healthz` | HTTP on the host | Liveness |
-| GitHub REST | HTTPS | Bearer installation token, `ETag` conditional requests |
+| GitHub REST | HTTPS | Planned: bearer installation token, `ETag` conditional requests |
 | OpenTelemetry export | HTTP with protobuf | Planned: traces, metrics, and logs to the host collector on port 4318. The code exports nothing yet |
 
 ## Scope
