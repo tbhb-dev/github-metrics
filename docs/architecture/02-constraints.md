@@ -9,4 +9,4 @@
 | Container image | A distroless static non-root image with one Go binary, a read-only root filesystem, and one writable volume |
 | Existing observability stack | The service sends OpenTelemetry data over HTTP to the host collector, which forwards traces, metrics, and logs to the backends |
 | No tail sampling | A PR's trace remains incomplete for weeks, and the collector pipeline for this service must not tail-sample |
-| Secrets as files | The webhook secret and the tunnel token are files on a read-only mount, never environment variables, and never image content |
+| Secrets as files | The webhook secret, the tunnel token, and the App private key are files on a read-only mount, never environment variables, and never image content |

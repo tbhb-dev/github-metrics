@@ -14,7 +14,7 @@ A `429`, or a `403` that cites a secondary limit, backs the budget off from one 
 
 ## Security
 
-Only a request with a valid signature reads or writes state. The service process never reads the App key. Tokens come from a `TokenSource` interface. Secrets are files.
+Only a request with a valid signature reads or writes state. Tokens come from a `TokenSource` interface, and `main` has only that interface. The wiki design has the service sign the installation JSON Web Token with the App private key, mounted as a read-only file. The operator may instead choose a separate minter, which would keep the key out of the service process. That choice is open. Secrets are files.
 
 ## Telemetry content
 

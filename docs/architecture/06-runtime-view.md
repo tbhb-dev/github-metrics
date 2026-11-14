@@ -3,9 +3,9 @@
 ## Scenario: a webhook delivery
 
 1. GitHub posts a delivery through the tunnel to the receiver.
-2. The receiver checks the method, the media type, and the size first. It then streams the body into the `HMAC` and compares the result with `X-Hub-Signature-256`.
-3. After the signature passes, one store transaction checks the dedupe table and records the delivery. In the same transaction, the receiver adds the body to the queue. A file sync follows, then the answer `202`.
-4. Using the signed body, the worker finds the repository and PR number and marks the PR. Afterward it deletes the body.
+2. First, the receiver checks the method, the media type, and the size. It answers `405` to a method other than `POST` and `415` to a media type other than `application/json`. It streams the body into the `HMAC`. The result must match `X-Hub-Signature-256`.
+3. After the signature passes, one store transaction checks the dedupe table and records the delivery. In the same transaction, the receiver adds the body to the queue. A file sync follows, then the answer `202`. A delivery ID that repeats with a different body hash gets `400`. The receiver logs the ID and both hashes.
+4. Using the signed body, the worker finds the repository and PR number and marks the PR. It deletes the body in the same transaction. A body that lists `repositories_added` schedules a backfill of those repositories instead.
 5. Next, the worker fetches the current PR state with conditional requests and compares it with what the service already exported.
 6. Last, the worker exports spans that just completed. The store records their IDs only after the collector accepts them.
 
