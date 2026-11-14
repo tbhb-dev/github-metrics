@@ -1,0 +1,8 @@
+.bazel-*
+bazel-*
+.worktrees/
+.venv/
+tmp/
+.DS_Store
+*.test
+coverage.out
