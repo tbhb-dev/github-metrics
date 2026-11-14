@@ -1,4 +1,4 @@
-# Appendix C. GitHub limit evidence
+# Appendix C: GitHub limit evidence
 
 Today the repository has a webhook receiver, a request budget, and a GitHub client. Everything else on this page that describes the service is design or planned.
 
