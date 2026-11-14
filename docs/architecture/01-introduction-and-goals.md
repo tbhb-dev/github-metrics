@@ -9,7 +9,7 @@ Today nobody can see how long a pull request (PR) waits for review or merge, or 
 | One trace per PR | The trace runs from creation to the first merge or close, with child spans for commits, review requests, reviews, reopens, and closes |
 | Timing metrics | Time from opening a pull request to its first review, and separately to its approval and its merge. Each has a repository label and an author type label |
 | No missed activity | Planned: scheduled reconciliation heals every missed webhook |
-| No private content | Design target: titles, bodies, comment text, and diffs never leave the service. Header values in logs need validation or redaction first (page 8) |
+| No private content | Design target: titles, bodies, comment text, and diffs never leave the service. The receiver checks the two header values it logs (page 8) |
 
 ## Quality goals
 

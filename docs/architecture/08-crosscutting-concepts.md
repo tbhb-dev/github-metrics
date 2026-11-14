@@ -24,7 +24,7 @@ Spans hold repository and branch names, PR numbers, logins, team slugs, states, 
 
 ## Logging
 
-Today `main` logs JSON to standard output. The design adds a second handler that exports each record to the collector as an `OTLP` log, with `deployment.environment.name` set. Loki should index it as a label. Page 11's export spike checks that. In the design, each log line has the delivery ID, the event, and the result, and no body, credential, or signature header. Today the receiver writes `X-GitHub-Delivery` and `X-GitHub-Event` to the log verbatim when they're nonempty. Since the `HMAC` covers only the body, a replayed valid body can put header text of any content into the logs. Logs avoid private content only after the design validates or redacts both values.
+Today `main` logs JSON to standard output. The design adds a second handler that exports each record to the collector as an `OTLP` log, with `deployment.environment.name` set. Loki should index it as a label. Page 11's export spike checks that. In the design, each log line has the delivery ID, the event, and the result, and no body, credential, or signature header. Because the `HMAC` covers only the body, a replayed valid body can arrive with any header text. Today the receiver logs `X-GitHub-Delivery` and `X-GitHub-Event` only when they match fixed patterns: 1 to 64 letters, digits, or hyphens for the delivery ID, and 1 to 64 lowercase letters, digits, or `_` for the event. Anything else gets `400` and a log line with a fixed reason.
 
 ## Testing
 

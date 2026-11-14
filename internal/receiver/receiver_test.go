@@ -22,6 +22,7 @@ const (
 	eventHeader    = "X-Github-Event"
 	testSecret     = "test-secret"
 	deliveryID     = "d-1"
+	pingEvent      = "ping"
 )
 
 func sign(secret, body string) string {
@@ -117,12 +118,6 @@ func TestWebhook(t *testing.T) {
 			want: http.StatusUnauthorized,
 		},
 		{
-			name:   "missing delivery id",
-			body:   body,
-			header: map[string]string{sigHeader: sign(testSecret, body)},
-			want:   http.StatusBadRequest,
-		},
-		{
 			name:   "too large",
 			body:   strings.Repeat("a", receiver.MaxBody+1),
 			header: map[string]string{sigHeader: sign(testSecret, body), deliveryHeader: deliveryID},
@@ -135,6 +130,56 @@ func TestWebhook(t *testing.T) {
 			t.Parallel()
 
 			got := do(t, testSecret, http.MethodPost, "/webhook", spec.body, spec.header)
+			if got != spec.want {
+				t.Errorf("status = %d, want %d", got, spec.want)
+			}
+		})
+	}
+}
+
+func TestWebhookHeaders(t *testing.T) {
+	t.Parallel()
+
+	const body = `{"action":"opened"}`
+
+	const guid = "0b7e4f1a-6c1d-11f1-9c3e-2f4a8d1b7e55"
+
+	tests := []struct {
+		name     string
+		delivery string
+		event    string
+		want     int
+	}{
+		{"real GUID", guid, "pull_request", http.StatusAccepted},
+		{"event with digits", deliveryID, "projects_v2_status_update", http.StatusAccepted},
+		{"delivery id of 64 characters", strings.Repeat("a", 64), pingEvent, http.StatusAccepted},
+		{"event of 64 characters", deliveryID, strings.Repeat("a", 64), http.StatusAccepted},
+		{"missing delivery id", "", pingEvent, http.StatusBadRequest},
+		{"missing event", deliveryID, "", http.StatusBadRequest},
+		{"event with a space", deliveryID, "pull request", http.StatusBadRequest},
+		{"event over 64 characters", deliveryID, strings.Repeat("a", 65), http.StatusBadRequest},
+		{"delivery id over 64 characters", strings.Repeat("a", 65), pingEvent, http.StatusBadRequest},
+		{"delivery id with a space and text", "d-1 secret=x", pingEvent, http.StatusBadRequest},
+		{"delivery id with an underscore", "d_1", pingEvent, http.StatusBadRequest},
+		{"delivery id with non-ASCII text", "d-\u00e9", pingEvent, http.StatusBadRequest},
+		{"event with uppercase", deliveryID, "Ping", http.StatusBadRequest},
+		{"event with non-ASCII text", deliveryID, "pi\u00f1g", http.StatusBadRequest},
+	}
+
+	for _, spec := range tests {
+		t.Run(spec.name, func(t *testing.T) {
+			t.Parallel()
+
+			header := map[string]string{sigHeader: sign(testSecret, body)}
+			if spec.delivery != "" {
+				header[deliveryHeader] = spec.delivery
+			}
+
+			if spec.event != "" {
+				header[eventHeader] = spec.event
+			}
+
+			got := do(t, testSecret, http.MethodPost, "/webhook", body, header)
 			if got != spec.want {
 				t.Errorf("status = %d, want %d", got, spec.want)
 			}
