@@ -6,6 +6,7 @@ subcommand
 x_defs
 cachehttp
 cacheControl
+cgo
 defaultHTTPClient
 depscan
 devel
