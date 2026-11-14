@@ -1,5 +1,7 @@
 # 6. Runtime view
 
+> Today versus design: the code has a webhook receiver and a GitHub client behind one request budget. The worker, the reconciler, the store, and the export remain design. Every step after the signature check is design.
+
 ## Scenario: a webhook delivery
 
 1. GitHub posts a delivery through the tunnel to the receiver.
@@ -13,7 +15,7 @@ Today the receiver answers `404` to every request except `GET /healthz` and `POS
 
 ## Scenario: scheduled reconciliation
 
-Every 15 minutes the reconciler lists each repository's PRs by update time with `If-None-Match` and walks back to the repository's watermark. Once a night it also reconciles every open PR. A first install triggers a backfill that produces traces and no metrics.
+Planned: every 15 minutes the reconciler lists each repository's PRs by update time with `If-None-Match` and walks back to the repository's watermark. Once a night it also reconciles every open PR. A first install triggers a backfill that produces traces and no metrics.
 
 ## Scenario: a failure
 
@@ -21,6 +23,6 @@ Every 15 minutes the reconciler lists each repository's PRs by update time with 
 | --- | --- |
 | Bad signature | `401`, no store access |
 | Body over 25 MiB | `413` |
-| Store error or full disk | `503`. GitHub records a failed delivery and reconciliation heals it |
-| Collector down | The failed export leaves the store unchanged and the PR retries on the next pass |
+| Store error or full disk | Planned: `503`. GitHub records a failed delivery and reconciliation heals it |
+| Collector down | Planned: the failed export leaves the store unchanged and the PR retries on the next pass |
 | Secondary rate limit | The client backs the budget off up to 15 minutes and retries |

@@ -1,13 +1,15 @@
 # 3. Context and scope
 
+> Today versus design: the code has a webhook receiver and a GitHub client behind one request budget. The worker, the reconciler, the store, and the export remain design. This page shows the rest as design.
+
 Diagram: `diagrams/structurizr-SystemContext.svg`, generated from `workspace.dsl`.
 
 ## Business context
 
 | Partner | Direction | Content |
 | --- | --- | --- |
-| GitHub | Inbound and outbound | Webhooks for PR and PR review events in, REST reads out |
-| Engineers | Outbound only | They read traces, metrics, and logs in the backends. They never call the service |
+| GitHub | Inbound and outbound | Webhooks for PR and PR review events in. REST reads out remain design, since `main` builds no client |
+| Engineers | Outbound only | In the design they read traces, metrics, and logs in the backends. They never call the service |
 
 ## Technical context
 

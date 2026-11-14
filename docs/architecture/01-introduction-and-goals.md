@@ -2,7 +2,7 @@
 
 ## Overview
 
-Today nobody can see how long a pull request (PR) waits for review or merge, or view one PR's lifecycle as a timeline. `github-metrics` fills that gap. It reads PR activity from GitHub and publishes OpenTelemetry (OTel) data. A PR lifecycle becomes one trace, each repository gets three timing histograms, and the design has the service export its own logs. The receiver and its signature check exist today.
+Today nobody can see how long a pull request (PR) waits for review or merge, or view one PR's lifecycle as a timeline. `github-metrics` fills that gap. In the design it reads PR activity from GitHub and publishes OpenTelemetry (OTel) data. A PR lifecycle becomes one trace, each repository gets three timing histograms, and the design has the service export its own logs. The receiver and its signature check exist today.
 
 | Goal | Meaning |
 | --- | --- |

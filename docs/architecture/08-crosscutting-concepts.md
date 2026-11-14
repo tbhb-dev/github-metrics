@@ -1,5 +1,7 @@
 # 8. Cross-cutting concepts
 
+> Today versus design: the code has a webhook receiver and a GitHub client behind one request budget. The worker, the reconciler, the store, and the export remain design. These concepts describe the design for the rest.
+
 ## Identity
 
 Trace IDs are the first 16 bytes of a SHA-256 digest over a fixed prefix and the PR's GraphQL node ID. Span IDs are the first 8 bytes of a digest that also covers the span kind and a key unique within the PR. Webhook and reconciliation runs derive the same IDs.
