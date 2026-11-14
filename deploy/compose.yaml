@@ -16,9 +16,14 @@
 # bind-mounts each file as it is, so the host file itself must be readable by
 # the numeric user below (65532), for example owned by 65532 with mode 0400.
 #
-# The tunnel connector makes outbound connections only. Its route, which
-# sends `POST /webhook` to `http://receiver:8080` and nothing else, is set in
-# Cloudflare, because a token-run connector takes its routes from there.
+# The tunnel connector makes outbound connections only. Its route is set in
+# Cloudflare, because a token-run connector takes its routes from there. That
+# route is a deployment prerequisite for ops to verify: it must send only
+# `POST /webhook` to `http://receiver:8080`, because the receiver also serves
+# `GET /healthz` without authentication.
+#
+# `restart: unless-stopped` restarts a container that exits, and does not
+# restart one that stays running but unhealthy. The health checks only report.
 name: github-metrics
 
 services:

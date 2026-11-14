@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -284,55 +285,93 @@ func TestUpRefusesNoArgument(t *testing.T) {
 	}
 }
 
+func composeText(t *testing.T) string {
+	t.Helper()
+
+	raw, err := os.ReadFile("compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(raw)
+}
+
 // TestComposeTakesTheImageVariable keeps the Compose file and the script
 // agreed on the variable name.
 func TestComposeTakesTheImageVariable(t *testing.T) {
 	t.Parallel()
 
-	raw, err := os.ReadFile("compose.yaml")
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := composeText(t)
 
-	if !strings.Contains(string(raw), "${GITHUB_METRICS_IMAGE:?") {
+	if !strings.Contains(raw, "${GITHUB_METRICS_IMAGE:?") {
 		t.Error("compose.yaml does not take its image from GITHUB_METRICS_IMAGE")
 	}
 }
 
-// TestComposeKeepsTheTunnelTight checks the tunnel connector in the Compose
-// file. The image is pinned by digest, the token is a file, and no service
-// publishes a port.
-func TestComposeKeepsTheTunnelTight(t *testing.T) {
+func tunnelService(t *testing.T) string {
+	t.Helper()
+
+	raw := composeText(t)
+
+	var block []string
+
+	inside := false
+
+	for line := range strings.SplitSeq(raw, "\n") {
+		isKey := strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ")
+
+		switch {
+		case line == "  tunnel:":
+			inside = true
+		case inside && (isKey || line != "" && !strings.HasPrefix(line, " ")):
+			inside = false
+		}
+
+		if inside {
+			block = append(block, line)
+		}
+	}
+
+	if len(block) == 0 {
+		t.Fatal("compose.yaml has no tunnel service")
+	}
+
+	return strings.Join(block, "\n")
+}
+
+// TestTunnelServiceSettings reads the block for the pinned image, the token
+// secret, the hardening keys and the absence of any port.
+func TestTunnelServiceSettings(t *testing.T) {
 	t.Parallel()
 
-	raw, err := os.ReadFile("compose.yaml")
-	if err != nil {
-		t.Fatal(err)
+	block := tunnelService(t)
+
+	image := regexp.MustCompile(`(?m)^    image: cloudflare/cloudflared:[0-9][0-9.]*@sha256:[0-9a-f]{64}$`)
+	if !image.MatchString(block) {
+		t.Error("the tunnel image is not cloudflare/cloudflared:<tag>@sha256:<64 hex digits>")
 	}
 
-	text := string(raw)
-
-	var tunnelImage string
-
-	for line := range strings.SplitSeq(text, "\n") {
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "image: cloudflare/cloudflared:"); ok {
-			tunnelImage = rest
+	for _, want := range []string{
+		"\n    user: \"65532:65532\"\n",
+		"\n    read_only: true\n",
+		"\n    cap_drop: [ALL]\n",
+		"\n      - no-new-privileges:true\n",
+		"\n    secrets:\n      - tunnel_token\n",
+		"\n      - --token-file\n      - /run/secrets/tunnel_token\n",
+		"\n    depends_on:\n      receiver:\n        condition: service_healthy\n",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the tunnel service lacks %q", strings.TrimSpace(want))
 		}
 	}
 
-	if !strings.Contains(tunnelImage, "@sha256:") {
-		t.Errorf("the tunnel image %q carries no digest", tunnelImage)
+	if !strings.Contains(composeText(t), "\n  tunnel_token:\n    file: ./secrets/tunnel_token\n") {
+		t.Error("compose.yaml does not define the tunnel_token secret as ./secrets/tunnel_token")
 	}
 
-	for _, want := range []string{"--token-file", "/run/secrets/tunnel_token", "file: ./secrets/tunnel_token"} {
-		if !strings.Contains(text, want) {
-			t.Errorf("compose.yaml lacks %q", want)
-		}
-	}
-
-	for _, banned := range []string{"ports:", "TUNNEL_TOKEN", "network_mode"} {
-		if strings.Contains(text, banned) {
-			t.Errorf("compose.yaml contains %q", banned)
+	for _, banned := range []string{"ports:", "network_mode", "TUNNEL_TOKEN", "privileged", "cap_add"} {
+		if strings.Contains(block, banned) {
+			t.Errorf("the tunnel service contains %q", banned)
 		}
 	}
 }
