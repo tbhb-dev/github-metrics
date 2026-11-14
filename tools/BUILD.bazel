@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Tony Burns
+
+load("@bazel_skylib//rules:native_binary.bzl", "native_test")
+load("@tbhb_rules//repo:defs.bzl", "repo_files")
+
+repo_files()
+
+# The Windows workspace status script (--config=release-windows), on
+# Windows only; //:bats_test covers the POSIX one.
+native_test(
+    name = "get_workspace_status_bat_test",
+    src = "get_workspace_status_test.bat",
+    out = "get_workspace_status_test.bat.exe_wrapper.bat",
+    data = ["get_workspace_status.bat"],
+    target_compatible_with = ["@platforms//os:windows"],
+)

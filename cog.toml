@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Tony Burns
+
+tag_prefix = "v"
+
+# No pre_bump_hooks: github-metrics carries no version literal for a release to
+# rewrite. The binary's Version, Commit and Date arrive from the workspace
+# status command at build time (tools/get_workspace_status.sh).
+
+[changelog]
+path = "CHANGELOG.md"
+template = ".cog/changelog.tera"
+remote = "github.com"
+repository = "github-metrics"
+owner = "tbhb-dev"
+authors = [{ username = "tbhb", signature = "Tony Burns" }]
+
+[commit_types]
+chore = { omit_from_changelog = true }
+test = { omit_from_changelog = true }
