@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -16,6 +17,7 @@ import (
 const (
 	digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	repo   = "ghcr.io/tbhb-dev/github-metrics"
+	pull   = "--pull"
 )
 
 // result is what one run of up.sh left behind.
@@ -40,7 +42,7 @@ func runUp(t *testing.T, args ...string) result {
 
 	dir := t.TempDir()
 	record := filepath.Join(dir, "record")
-	stub := "#!/bin/sh\necho \"$GITHUB_METRICS_IMAGE|$*\" > '" + record + "'\n"
+	stub := "#!/bin/sh\n{ echo \"$GITHUB_METRICS_IMAGE\"; printf '%s\\n' \"$@\"; } > '" + record + "'\n"
 
 	err := os.WriteFile(filepath.Join(dir, "docker"), []byte(stub), 0o700) //nolint:gosec // the stub must be executable
 	if err != nil {
@@ -86,9 +88,9 @@ func runUp(t *testing.T, args ...string) result {
 	return res
 }
 
-// checkRan runs up.sh and expects it to hand image and the compose arguments to
-// docker.
-func checkRan(t *testing.T, image, suffix string, args ...string) {
+// checkRan runs up.sh and expects it to hand docker the image in the
+// environment and exactly the Compose arguments, one per line.
+func checkRan(t *testing.T, image string, args ...string) {
 	t.Helper()
 
 	res := runUp(t, append([]string{image}, args...)...)
@@ -97,23 +99,53 @@ func checkRan(t *testing.T, image, suffix string, args ...string) {
 		t.Fatalf("up.sh %s: exit %d, ran=%v: %s", image, res.code, res.ran, res.output)
 	}
 
-	if !strings.HasPrefix(res.record, image+"|compose -f ") ||
-		!strings.HasSuffix(strings.TrimSpace(res.record), suffix) {
-		t.Errorf("docker saw %q", res.record)
+	want := append([]string{image, "compose", "-f", "./compose.yaml", "up", "-d"}, args...)
+
+	if got := strings.Split(strings.TrimSuffix(res.record, "\n"), "\n"); !slices.Equal(got, want) {
+		t.Errorf("docker saw %q, want %q", got, want)
 	}
 }
 
 func TestUpAcceptsDigest(t *testing.T) {
 	t.Parallel()
 
-	checkRan(t, repo+"@"+digest, "compose.yaml up -d")
+	checkRan(t, repo+"@"+digest)
 }
 
 // TestUpAcceptsImageID covers the form a classic image store needs.
 func TestUpAcceptsImageID(t *testing.T) {
 	t.Parallel()
 
-	checkRan(t, digest, "compose.yaml up -d --pull never", "--pull", "never")
+	checkRan(t, digest, pull, "never")
+}
+
+func TestUpRefusesOtherArguments(t *testing.T) {
+	t.Parallel()
+
+	image := repo + "@" + digest
+	argSets := map[string][]string{
+		"other compose file": {"-f", "other.yaml"},
+		"project name":       {"-p", "other"},
+		"env file":           {"--env-file", "other.env"},
+		"pull always":        {pull, "always"},
+		"pull missing value": {pull},
+		"pull joined":        {"--pull=never"},
+		"pull in one word":   {"--pull never"},
+		"extra after pull":   {pull, "never", "--force-recreate"},
+		"extra option":       {"--wait"},
+	}
+
+	for name, args := range argSets {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			res := runUp(t, append([]string{image}, args...)...)
+
+			if res.code != 2 || res.ran {
+				t.Errorf("up.sh %q: exit %d, ran=%v, want exit 2 and no run: %s", args, res.code, res.ran, res.output)
+			}
+		})
+	}
 }
 
 func TestUpRefusesOtherReferences(t *testing.T) {
