@@ -14,7 +14,9 @@ import (
 	"time"
 )
 
-// Priority orders waiters. A lower value goes first.
+// Priority orders waiters. A lower value goes first. The order is strict and
+// has no aging, so steady webhook and incremental load can starve sweep and
+// backfill work, which is the intended trade: live events come first.
 type Priority int
 
 // The priorities, highest first.
@@ -119,7 +121,7 @@ func (l *Limiter) Wait(ctx context.Context, priority Priority) error {
 }
 
 // Observe records the rate limit headers of a response. Under the floor it
-// stops all work until reset.
+// stops all work until reset. A zero or past reset time has no effect.
 func (l *Limiter) Observe(remaining int, reset time.Time) {
 	if remaining >= Floor {
 		return
@@ -241,10 +243,14 @@ func laterOf(a, b time.Time) time.Time {
 	return a
 }
 
-func (l *Limiter) take(now time.Time, w *waiter) {
+func (l *Limiter) take(now time.Time, taker *waiter) {
+	if l.tokens >= Burst {
+		l.refilled = now
+	}
+
 	l.tokens--
 	l.nextAllowed = now.Add(Spacing)
-	l.remove(w)
+	l.remove(taker)
 }
 
 func (l *Limiter) remove(w *waiter) {
@@ -259,7 +265,8 @@ func (l *Limiter) remove(w *waiter) {
 	l.notify()
 }
 
-// notify wakes every waiter to re-check its place.
+// notify wakes every waiter to re-check its place. The cost is linear in the
+// number of waiters for each event, which suits a few callers.
 func (l *Limiter) notify() {
 	close(l.changed)
 	l.changed = make(chan struct{})

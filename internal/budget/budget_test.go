@@ -98,6 +98,55 @@ func TestHigherPriorityGoesFirst(t *testing.T) {
 	})
 }
 
+// TestAllPrioritiesGoInOrder queues one request per priority, lowest first,
+// behind a drained bucket and expects the reverse order out.
+func TestAllPrioritiesGoInOrder(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		lim := budget.New()
+		drain(t, lim)
+
+		order := make(chan budget.Priority, 4)
+
+		for _, p := range []budget.Priority{budget.Backfill, budget.Sweep, budget.Incremental, budget.Webhook} {
+			go func() {
+				err := lim.Wait(t.Context(), p)
+				if err == nil {
+					order <- p
+				}
+			}()
+
+			synctest.Wait()
+		}
+
+		for _, want := range []budget.Priority{budget.Webhook, budget.Incremental, budget.Sweep, budget.Backfill} {
+			if got := <-order; got != want {
+				t.Fatalf("priority %d went where %d belongs", got, want)
+			}
+		}
+	})
+}
+
+// TestShortBackoffKeepsTheLongerReset checks that a short retry-after after a
+// low remaining count doesn't shorten the wait until the reset.
+func TestShortBackoffKeepsTheLongerReset(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		lim := budget.New()
+		reset := time.Now().Add(20 * time.Minute)
+
+		lim.Observe(budget.Floor-1, reset)
+		lim.Backoff(time.Second)
+		mustWait(t, lim, budget.Webhook)
+
+		if now := time.Now(); now.Before(reset) {
+			t.Fatalf("request went at %v, before the reset at %v", now, reset)
+		}
+	})
+}
+
 // TestLowRemainingStopsUntilReset checks the floor on x-ratelimit-remaining.
 func TestLowRemainingStopsUntilReset(t *testing.T) {
 	t.Parallel()
