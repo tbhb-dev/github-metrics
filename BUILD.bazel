@@ -102,6 +102,8 @@ GO_TARGETS = [
     "//cmd/github-metrics:github-metrics_lib",
     "//internal/budget",
     "//internal/budget:budget_test",
+    "//internal/ghclient",
+    "//internal/ghclient:ghclient_test",
     "//internal/receiver",
     "//deploy:deploy_test",
     "//internal/receiver:receiver_test",
