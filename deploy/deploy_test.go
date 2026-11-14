@@ -316,14 +316,31 @@ func tunnelService(t *testing.T) string {
 	var block []string
 
 	inside := false
+	top := ""
 
 	for line := range strings.SplitSeq(raw, "\n") {
-		isKey := strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ")
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			if inside {
+				block = append(block, line)
+			}
+
+			continue
+		}
+
+		if !strings.HasPrefix(line, " ") {
+			top = line
+			inside = false
+
+			continue
+		}
+
+		isKey := !strings.HasPrefix(line, "   ")
 
 		switch {
-		case line == "  tunnel:":
+		case top == "services:" && line == "  tunnel:":
 			inside = true
-		case inside && (isKey || line != "" && !strings.HasPrefix(line, " ")):
+		case isKey:
 			inside = false
 		}
 
@@ -355,7 +372,7 @@ func TestTunnelServiceSettings(t *testing.T) {
 		"\n    user: \"65532:65532\"\n",
 		"\n    read_only: true\n",
 		"\n    cap_drop: [ALL]\n",
-		"\n      - no-new-privileges:true\n",
+		"\n    security_opt:\n      - no-new-privileges:true\n",
 		"\n    secrets:\n      - tunnel_token\n",
 		"\n      - --token-file\n      - /run/secrets/tunnel_token\n",
 		"\n    depends_on:\n      receiver:\n        condition: service_healthy\n",
@@ -369,9 +386,15 @@ func TestTunnelServiceSettings(t *testing.T) {
 		t.Error("compose.yaml does not define the tunnel_token secret as ./secrets/tunnel_token")
 	}
 
-	for _, banned := range []string{"ports:", "network_mode", "TUNNEL_TOKEN", "privileged", "cap_add"} {
+	for _, banned := range []string{"privileged", "cap_add"} {
 		if strings.Contains(block, banned) {
 			t.Errorf("the tunnel service contains %q", banned)
+		}
+	}
+
+	for _, banned := range []string{"ports:", "network_mode", "TUNNEL_TOKEN"} {
+		if strings.Contains(composeText(t), banned) {
+			t.Errorf("compose.yaml contains %q", banned)
 		}
 	}
 }
