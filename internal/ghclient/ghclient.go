@@ -28,6 +28,12 @@ const (
 	maxAttempts = 4
 	// maxBody caps a response body.
 	maxBody = 16 << 20
+	// maxRetryAfter clamps a `retry-after` wait, matching the budget's cap.
+	maxRetryAfter = 15 * time.Minute
+	// maxETags bounds the stored tags.
+	maxETags = 10000
+	// bodyProbe is how much of a 403 body is searched for a secondary limit.
+	bodyProbe = 4096
 
 	apiVersion = "2022-11-28"
 	userAgent  = "github-metrics"
@@ -36,12 +42,23 @@ const (
 // ErrGaveUp is wrapped by the error of a Get that used every attempt.
 var ErrGaveUp = errors.New("github request gave up")
 
+// ErrBodyTooLarge is wrapped by the error of a Get whose body exceeds 16 MiB.
+var ErrBodyTooLarge = errors.New("github response body is too large")
+
+// ErrInsecureBase is returned by New for a base URL that doesn't use TLS.
+var ErrInsecureBase = errors.New("github base URL must use https")
+
+// ErrTokenSource is wrapped by the error of a Get whose TokenSource failed.
+// The source's own error text isn't included, because it may hold a token.
+var ErrTokenSource = errors.New("installation token source failed")
+
 // ErrOutsideBase is wrapped by the error of a Get whose target is on another
 // host than the base URL, which would send the token there.
 var ErrOutsideBase = errors.New("github request target is outside the base URL")
 
 // TokenSource supplies installation tokens. The client never logs one, and
-// never keeps one past a call.
+// never keeps one past a call. The client drops the text of an error from a
+// source. The source logs its own failures.
 type TokenSource interface {
 	// Token returns the current token, renewed when little time remains.
 	Token(ctx context.Context) (string, error)
@@ -85,6 +102,14 @@ func (e *ETags) Set(target, etag string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	if _, known := e.seen[target]; !known && len(e.seen) >= maxETags {
+		for victim := range e.seen {
+			delete(e.seen, victim)
+
+			break
+		}
+	}
+
 	e.seen[target] = etag
 }
 
@@ -127,11 +152,22 @@ func New(
 		return nil, fmt.Errorf("parse base URL: %w", err)
 	}
 
-	return &Client{base: base, http: httpClient, budget: lim, tokens: tokens, etags: etags}, nil
+	if base.Scheme != "https" {
+		return nil, fmt.Errorf("base URL %q: %w", baseURL, ErrInsecureBase)
+	}
+
+	// A redirect would skip the budget and could keep the token on another
+	// port or a child domain. The client returns the redirect response.
+	own := *httpClient
+	own.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	return &Client{base: base, http: &own, budget: lim, tokens: tokens, etags: etags}, nil
 }
 
 // Get fetches a path such as `/repos/o/r/pulls?per_page=100`, or the Next
-// URL of an earlier response. It waits for a budget slot at the given
+// URL of an earlier response. A new `ETag` is stored on receipt, so a caller
+// that can't use a 200 body gets only a 304 on the next call and must clear
+// the tag first. A redirect returns a status error. It waits for a budget slot at the given
 // priority. A 401 renews the token once. A secondary rate limit response
 // backs the budget off and retries, up to four sends in all.
 func (c *Client) Get(ctx context.Context, priority budget.Priority, target string) (*Response, error) {
@@ -216,7 +252,7 @@ func (c *Client) token(ctx context.Context, renew bool) (string, error) {
 	}
 
 	if err != nil {
-		return "", fmt.Errorf("installation token: %w", err)
+		return "", ErrTokenSource
 	}
 
 	return token, nil
@@ -244,9 +280,13 @@ func (c *Client) send(ctx context.Context, full *url.URL, token string) (*reply,
 
 	defer func() { _ = res.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(res.Body, maxBody))
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxBody+1))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", full.Path, err)
+	}
+
+	if len(body) > maxBody {
+		return nil, fmt.Errorf("get %s: %w", full.Path, ErrBodyTooLarge)
 	}
 
 	return &reply{header: res.Header, body: body, status: res.StatusCode}, nil
@@ -288,26 +328,63 @@ func isSecondaryLimit(got *reply) bool {
 		return true
 	}
 
-	return got.status == http.StatusForbidden &&
-		(got.header.Get("Retry-After") != "" || strings.Contains(strings.ToLower(string(got.body)), "secondary rate limit"))
+	if got.status != http.StatusForbidden {
+		return false
+	}
+
+	probe := strings.ToLower(string(got.body[:min(len(got.body), bodyProbe)]))
+
+	return got.header.Get("Retry-After") != "" || strings.Contains(probe, "secondary rate limit")
 }
 
-// retryAfter returns the `retry-after` seconds, or zero when absent.
+// retryAfter returns the `retry-after` wait, as seconds or an HTTP date,
+// clamped to maxRetryAfter. It's zero when the header is absent or invalid.
 func retryAfter(header http.Header) time.Duration {
-	seconds, err := strconv.Atoi(header.Get("Retry-After"))
-	if err != nil || seconds <= 0 {
+	value := strings.TrimSpace(header.Get("Retry-After"))
+
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+
+		return time.Duration(min(seconds, int64(maxRetryAfter/time.Second))) * time.Second
+	}
+
+	date, err := http.ParseTime(value)
+	if err != nil {
 		return 0
 	}
 
-	return time.Duration(seconds) * time.Second
+	return min(max(time.Until(date), 0), maxRetryAfter)
 }
 
-// nextLink returns the `rel="next"` URL of a Link header.
+// nextLink returns the `rel="next"` URL of the Link headers. A URL may hold
+// commas. It reads each angle-bracket span before its parameters.
 func nextLink(header http.Header) string {
-	for entry := range strings.SplitSeq(header.Get("Link"), ",") {
-		target, rel, found := strings.Cut(strings.TrimSpace(entry), ";")
-		if found && strings.Contains(rel, `rel="next"`) {
-			return strings.Trim(strings.TrimSpace(target), "<>")
+	for _, value := range header.Values("Link") {
+		for rest := value; ; {
+			open := strings.Index(rest, "<")
+			if open < 0 {
+				break
+			}
+
+			end := strings.Index(rest[open:], ">")
+			if end < 0 {
+				break
+			}
+
+			target := rest[open+1 : open+end]
+			rest = rest[open+end+1:]
+
+			params := rest
+			if next := strings.Index(rest, "<"); next >= 0 {
+				params = rest[:next]
+			}
+
+			if strings.Contains(params, `rel="next"`) {
+				return target
+			}
 		}
 	}
 

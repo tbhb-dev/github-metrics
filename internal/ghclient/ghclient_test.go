@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func newClient(
 ) (*ghclient.Client, *httptest.Server) {
 	t.Helper()
 
-	srv := httptest.NewServer(handler)
+	srv := httptest.NewTLSServer(handler)
 	t.Cleanup(srv.Close)
 
 	client, err := ghclient.New(srv.URL, srv.Client(), budget.New(), tokens, ghclient.NewETags())
@@ -68,18 +69,22 @@ func write(t *testing.T, w http.ResponseWriter, body string) {
 	}
 }
 
-const etagValue = `"abc"`
+const (
+	etagValue        = `"abc"`
+	retryAfterHeader = "Retry-After"
+)
 
 func TestGetSendsHeaders(t *testing.T) {
 	t.Parallel()
 
 	client, _ := newClient(t, func(resp http.ResponseWriter, req *http.Request) {
 		if req.Header.Get("Authorization") != "Bearer fake-0" {
-			t.Errorf("authorization = %q", req.Header.Get("Authorization"))
+			t.Error("authorization header mismatch")
 		}
 
-		if req.Header.Get("X-Github-Api-Version") == "" || req.Header.Get("Accept") == "" {
-			t.Error("missing version or accept header")
+		if req.Header.Get("X-Github-Api-Version") == "" || req.Header.Get("Accept") == "" ||
+			req.Header.Get("User-Agent") != "github-metrics" {
+			t.Error("missing version, accept or user agent header")
 		}
 
 		write(t, resp, "[]")
@@ -197,9 +202,7 @@ func TestSecondUnauthorizedStops(t *testing.T) {
 func TestOtherStatusFails(t *testing.T) {
 	t.Parallel()
 
-	client, _ := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}, newTokens())
+	client := statusClient(t, http.StatusNotFound)
 
 	var status *ghclient.StatusError
 
@@ -236,7 +239,7 @@ func fakeClient(t *testing.T, transport roundTrip) *ghclient.Client {
 	t.Helper()
 
 	client, err := ghclient.New(
-		"http://api.test",
+		"https://api.test",
 		&http.Client{Transport: transport, CheckRedirect: nil, Jar: nil, Timeout: 0},
 		budget.New(),
 		newTokens(),
@@ -257,7 +260,7 @@ func TestSecondaryLimitBacksOffThenRetries(t *testing.T) {
 
 		client := fakeClient(t, func(*http.Request) *http.Response {
 			if calls.Add(1) == 1 {
-				return reply(http.StatusForbidden, http.Header{"Retry-After": {"120"}})
+				return reply(http.StatusForbidden, http.Header{retryAfterHeader: {"120"}})
 			}
 
 			return reply(http.StatusOK, http.Header{})
@@ -280,13 +283,17 @@ func TestSecondaryLimitGivesUp(t *testing.T) {
 	t.Parallel()
 
 	synctestRun(t, func(ctx context.Context) {
+		var calls atomic.Int32
+
 		client := fakeClient(t, func(*http.Request) *http.Response {
+			calls.Add(1)
+
 			return reply(http.StatusTooManyRequests, http.Header{})
 		})
 
 		_, err := client.Get(ctx, budget.Webhook, "/x")
-		if !errors.Is(err, ghclient.ErrGaveUp) {
-			t.Fatalf("err = %v", err)
+		if !errors.Is(err, ghclient.ErrGaveUp) || calls.Load() != 4 {
+			t.Fatalf("err = %v, calls = %d", err, calls.Load())
 		}
 	})
 }
@@ -320,4 +327,181 @@ func TestLowRemainingStopsUntilReset(t *testing.T) {
 			t.Fatalf("second request ran at %v, before the reset %v", time.Now(), reset)
 		}
 	})
+}
+
+// waitAfterLimit sends one request whose first answer is a 429 with the given
+// `retry-after` value, and returns how long the call took on the fake clock.
+func waitAfterLimit(ctx context.Context, t *testing.T, value string) (time.Duration, error) {
+	t.Helper()
+
+	var calls atomic.Int32
+
+	client := fakeClient(t, func(*http.Request) *http.Response {
+		if calls.Add(1) == 1 {
+			return reply(http.StatusTooManyRequests, http.Header{retryAfterHeader: {value}})
+		}
+
+		return reply(http.StatusOK, http.Header{})
+	})
+
+	start := time.Now()
+	_, err := client.Get(ctx, budget.Webhook, "/x")
+
+	return time.Since(start), err
+}
+
+func TestRetryAfterIsClamped(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{"864000", "9223372037", "18446744074"} {
+		synctestRun(t, func(ctx context.Context) {
+			waited, err := waitAfterLimit(ctx, t, value)
+			if err != nil || waited < time.Minute || waited > 16*time.Minute {
+				t.Fatalf("retry-after %s: err = %v, waited %v", value, err, waited)
+			}
+		})
+	}
+}
+
+func TestRetryAfterHTTPDate(t *testing.T) {
+	t.Parallel()
+
+	synctestRun(t, func(ctx context.Context) {
+		date := time.Now().Add(5 * time.Minute).UTC().Format(http.TimeFormat)
+
+		waited, err := waitAfterLimit(ctx, t, date)
+		if err != nil || waited < 4*time.Minute {
+			t.Fatalf("err = %v, waited %v", err, waited)
+		}
+	})
+}
+
+func TestRedirectIsNotFollowed(t *testing.T) {
+	t.Parallel()
+
+	var hits atomic.Int32
+
+	other := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits.Add(1) }))
+	t.Cleanup(other.Close)
+
+	client, _ := newClient(t, func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, other.URL, http.StatusFound)
+	}, newTokens())
+
+	_, err := client.Get(t.Context(), budget.Webhook, "/x")
+
+	var status *ghclient.StatusError
+	if !errors.As(err, &status) || status.Status != http.StatusFound || hits.Load() != 0 {
+		t.Fatalf("err = %v, hits = %d", err, hits.Load())
+	}
+}
+
+func TestOversizedBodyIsRefused(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+
+	client, _ := newClient(t, func(w http.ResponseWriter, req *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("ETag", etagValue)
+			write(t, w, strings.Repeat("x", 16<<20+1))
+
+			return
+		}
+
+		if req.Header.Get("If-None-Match") != "" {
+			t.Error("an oversized body stored its ETag")
+		}
+	}, newTokens())
+
+	_, err := client.Get(t.Context(), budget.Webhook, "/x")
+	if !errors.Is(err, ghclient.ErrBodyTooLarge) {
+		t.Fatalf("err = %v", err)
+	}
+
+	_, err = client.Get(t.Context(), budget.Webhook, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTokenErrorTextIsDropped(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newClient(t, func(http.ResponseWriter, *http.Request) {}, leakyTokens{})
+
+	_, err := client.Get(t.Context(), budget.Webhook, "/x")
+	if !errors.Is(err, ghclient.ErrTokenSource) || strings.Contains(err.Error(), "leaked-installation-credential") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+type leakyTokens struct{}
+
+func (leakyTokens) Token(context.Context) (string, error) { return "", errLeak }
+func (leakyTokens) Renew(context.Context) (string, error) { return "", errLeak }
+
+var errLeak = errors.New("sign failed for leaked-installation-credential")
+
+func TestNotModifiedWithoutStoredTag(t *testing.T) {
+	t.Parallel()
+
+	client := statusClient(t, http.StatusNotModified)
+
+	res, err := client.Get(t.Context(), budget.Webhook, "/x")
+	if err != nil || !res.NotModified() || res.ETag != "" {
+		t.Fatalf("res = %+v, %v", res, err)
+	}
+}
+
+func TestInsecureBaseIsRejected(t *testing.T) {
+	t.Parallel()
+
+	_, err := ghclient.New("http://api.github.com", http.DefaultClient, budget.New(), newTokens(), ghclient.NewETags())
+	if !errors.Is(err, ghclient.ErrInsecureBase) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNextLinkWithCommasAndSeveralHeaders(t *testing.T) {
+	t.Parallel()
+
+	client, _ := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Add("Link", `<https://x/y?labels=a,b&page=1>; rel="prev"`)
+		w.Header().Add("Link", `<https://x/y?labels=a,b&page=3>; rel="next", <https://x/y?page=9>; rel="last"`)
+	}, newTokens())
+
+	res, err := client.Get(t.Context(), budget.Webhook, "/x")
+	if err != nil || res.Next != "https://x/y?labels=a,b&page=3" {
+		t.Fatalf("next = %q, %v", res.Next, err)
+	}
+}
+
+func TestETagsAreBounded(t *testing.T) {
+	t.Parallel()
+
+	etags := ghclient.NewETags()
+	for i := range 10050 {
+		etags.Set("k"+strconv.Itoa(i), "v")
+	}
+
+	kept := 0
+
+	for i := range 10050 {
+		if etags.Get("k"+strconv.Itoa(i)) != "" {
+			kept++
+		}
+	}
+
+	if kept > 10000 {
+		t.Fatalf("kept %d tags", kept)
+	}
+}
+
+func statusClient(t *testing.T, status int) *ghclient.Client {
+	t.Helper()
+
+	client, _ := newClient(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) }, newTokens())
+
+	return client
 }
