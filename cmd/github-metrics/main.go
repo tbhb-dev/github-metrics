@@ -5,7 +5,8 @@
 //
 // WEBHOOK_SECRET_FILE names a file that contains the App's webhook secret.
 //
-// LISTEN_ADDR is the listen address and defaults to :8080.
+// LISTEN_ADDR is the listen address and defaults to :8080. The health check
+// probes that address, or loopback when its host is a wildcard.
 //
 // With -healthcheck the command probes the local health endpoint and exits
 // 0 or 1, so a container health check works in an image that has no shell.
@@ -18,7 +19,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,12 +28,7 @@ import (
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
 )
 
-// The write timeout covers the body read, so it must exceed the read timeout.
 const (
-	headerTimeout   = 5 * time.Second
-	readTimeout     = 30 * time.Second
-	writeTimeout    = 40 * time.Second
-	idleTimeout     = 60 * time.Second
 	shutdownTimeout = 10 * time.Second
 	probeTimeout    = 3 * time.Second
 )
@@ -82,13 +77,7 @@ func run(addr string, log *slog.Logger) error {
 		return errEmptySecret
 	}
 
-	srv := new(http.Server)
-	srv.Addr = addr
-	srv.Handler = receiver.Handler(secret, log)
-	srv.ReadHeaderTimeout = headerTimeout
-	srv.ReadTimeout = readTimeout
-	srv.WriteTimeout = writeTimeout
-	srv.IdleTimeout = idleTimeout
+	srv := receiver.NewServer(addr, receiver.Handler(secret, log))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -118,7 +107,7 @@ func run(addr string, log *slog.Logger) error {
 
 // probe asks the local health endpoint and returns the exit code.
 func probe(addr string) int {
-	_, port, err := net.SplitHostPort(addr)
+	url, err := receiver.HealthURL(addr)
 	if err != nil {
 		return 1
 	}
@@ -126,14 +115,12 @@ func probe(addr string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 
-	url := "http://" + net.JoinHostPort("127.0.0.1", port) + "/healthz"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // loopback
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // own address
 	if err != nil {
 		return 1
 	}
 
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec // loopback
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // own address
 	if err != nil {
 		return 1
 	}

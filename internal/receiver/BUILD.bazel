@@ -8,14 +8,20 @@ repo_files()
 
 go_library(
     name = "receiver",
-    srcs = ["receiver.go"],
+    srcs = [
+        "receiver.go",
+        "server.go",
+    ],
     importpath = "github.com/tbhb-dev/github-metrics/internal/receiver",
     visibility = ["//:__subpackages__"],
 )
 
 go_test(
     name = "receiver_test",
-    srcs = ["receiver_test.go"],
+    srcs = [
+        "receiver_test.go",
+        "server_test.go",
+    ],
     visibility = ["//:__pkg__"],
     deps = [":receiver"],
 )
