@@ -11,7 +11,15 @@ set -eu
 
 image=${1:-}
 
-if ! printf '%s\n' "$image" | grep -Eq '^[^@[:space:]]+@sha256:[0-9a-f]{64}$'; then
+# case sees the whole string, so a newline can't hide a second line from grep.
+case $image in
+*[[:space:]]*)
+  echo "up.sh: the image must not contain whitespace or a newline" >&2
+  exit 2
+  ;;
+esac
+
+if ! printf '%s\n' "$image" | grep -Eq '^[^@]+@sha256:[0-9a-f]{64}$'; then
   echo "up.sh: the image must be <name>@sha256:<64 hex digits>, got '$image'" >&2
   exit 2
 fi

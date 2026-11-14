@@ -78,15 +78,17 @@ func TestUpRefusesOtherReferences(t *testing.T) {
 	t.Parallel()
 
 	refs := map[string]string{
-		"empty":           "",
-		"tag":             "ghcr.io/tbhb-dev/github-metrics:sha-abc",
-		"latest":          "ghcr.io/tbhb-dev/github-metrics:latest",
-		"trailing text":   "ghcr.io/tbhb-dev/github-metrics@" + digest + "x",
-		"short digest":    "ghcr.io/tbhb-dev/github-metrics@sha256:abc",
-		"upper digest":    "ghcr.io/tbhb-dev/github-metrics@sha256:" + strings.Repeat("A", 64),
-		"other algorithm": "ghcr.io/tbhb-dev/github-metrics@sha512:" + strings.Repeat("a", 64),
-		"no name":         "@" + digest,
-		"space":           "ghcr.io/tbhb-dev/github-metrics @" + digest,
+		"empty":            "",
+		"tag":              "ghcr.io/tbhb-dev/github-metrics:sha-abc",
+		"latest":           "ghcr.io/tbhb-dev/github-metrics:latest",
+		"trailing text":    "ghcr.io/tbhb-dev/github-metrics@" + digest + "x",
+		"short digest":     "ghcr.io/tbhb-dev/github-metrics@sha256:abc",
+		"upper digest":     "ghcr.io/tbhb-dev/github-metrics@sha256:" + strings.Repeat("A", 64),
+		"other algorithm":  "ghcr.io/tbhb-dev/github-metrics@sha512:" + strings.Repeat("a", 64),
+		"no name":          "@" + digest,
+		"embedded newline": "ghcr.io/tbhb-dev/github-metrics:latest\nghcr.io/tbhb-dev/github-metrics@" + digest,
+		"trailing newline": "ghcr.io/tbhb-dev/github-metrics@" + digest + "\n",
+		"space":            "ghcr.io/tbhb-dev/github-metrics @" + digest,
 	}
 
 	for name, image := range refs {
