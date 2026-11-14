@@ -1,4 +1,4 @@
-# Alternatives considered
+# Appendix D: alternatives considered and rejected
 
 Today the code has only the webhook receiver, the request budget, and the GitHub client. Everything else is design or planned. Still to build are the worker, the reconciler, the store, and the OTel export. Treat every statement about them as a plan.
 
