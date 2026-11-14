@@ -22,12 +22,11 @@ const MaxBody = 25 << 20
 
 const signaturePrefix = "sha256="
 
-// The HMAC covers only the body, so a replayed valid body can arrive with any
-// header text. The delivery ID and event name reach the logs, so both must
-// match these patterns first. GitHub sends a UUID and a lowercase event name.
+// The signature covers only the body, so both headers need their own check.
+// Event names are lowercase and can hold digits, as in projects_v2.
 var (
 	deliveryPattern = regexp.MustCompile(`^[0-9A-Za-z-]{1,64}$`)
-	eventPattern    = regexp.MustCompile(`^[a-z_]{1,64}$`)
+	eventPattern    = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 )
 
 // Handler serves GET /healthz and POST /webhook. Every other request, and a

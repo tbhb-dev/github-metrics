@@ -16,7 +16,7 @@ Expected diagram, not yet generated: `diagrams/structurizr-Components.svg`, from
 
 | Component | Package | Status |
 | --- | --- | --- |
-| Webhook receiver | `internal/receiver` | Verifies the signature and answers `202`. It stores and processes nothing yet |
+| Webhook receiver | `internal/receiver` | Verifies the signature, checks the delivery and event headers, and answers `202` or `400`. It stores and processes nothing yet |
 | Request budget | `internal/budget` | Built. It ranks callers as webhook, incremental, sweep, then backfill |
 | GitHub client | `internal/ghclient` | Built. Conditional requests, paging, token renewal, backoff |
 | Worker | planned | Turns reconciled state into spans and observations |

@@ -8,7 +8,7 @@ workspace "github-metrics" "Turns GitHub pull request activity into OpenTelemetr
         githubMetrics = softwareSystem "github-metrics" "Receives webhooks today. Design: reconciles pull request state from REST and exports telemetry." {
             tunnel = container "Tunnel connector" "Routes only POST /webhook from the public hostname to the service. Makes outbound connections only." "cloudflared"
             service = container "Service" "One static binary. Today it has the webhook receiver. Design: a worker and a reconciler." "Go" {
-                receiver = component "Webhook receiver" "Verifies the signature while streaming the body, then answers 202." "net/http"
+                receiver = component "Webhook receiver" "Verifies the signature while streaming the body, checks the delivery and event headers, then answers 202 or 400." "net/http"
                 worker = component "Worker" "Planned. Turns the current state of a pull request into spans and metric observations." "Go"
                 reconciler = component "Reconciler" "Planned. Polls REST every 15 minutes, sweeps open pull requests nightly, and backfills new installations." "Go"
                 limiter = component "Request budget" "One shared token bucket with four priorities." "internal/budget"
