@@ -19,6 +19,7 @@ The service is under construction. Each page says what exists on main and what t
 | [11-risks-and-technical-debt.md](11-risks-and-technical-debt.md) | Risks and technical debt |
 | [12-glossary.md](12-glossary.md) | Glossary |
 | [appendix-a-trace-and-metric-catalog.md](appendix-a-trace-and-metric-catalog.md) | Appendix A: trace and metric catalog |
+| [appendix-b-app-permissions-and-events.md](appendix-b-app-permissions-and-events.md) | Appendix B: permissions, manifest keys, and events |
 
 ## Diagrams
 
