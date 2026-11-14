@@ -298,3 +298,41 @@ func TestComposeTakesTheImageVariable(t *testing.T) {
 		t.Error("compose.yaml does not take its image from GITHUB_METRICS_IMAGE")
 	}
 }
+
+// TestComposeKeepsTheTunnelTight checks the tunnel connector in the Compose
+// file. The image is pinned by digest, the token is a file, and no service
+// publishes a port.
+func TestComposeKeepsTheTunnelTight(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile("compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	text := string(raw)
+
+	var tunnelImage string
+
+	for line := range strings.SplitSeq(text, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "image: cloudflare/cloudflared:"); ok {
+			tunnelImage = rest
+		}
+	}
+
+	if !strings.Contains(tunnelImage, "@sha256:") {
+		t.Errorf("the tunnel image %q carries no digest", tunnelImage)
+	}
+
+	for _, want := range []string{"--token-file", "/run/secrets/tunnel_token", "file: ./secrets/tunnel_token"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("compose.yaml lacks %q", want)
+		}
+	}
+
+	for _, banned := range []string{"ports:", "TUNNEL_TOKEN", "network_mode"} {
+		if strings.Contains(text, banned) {
+			t.Errorf("compose.yaml contains %q", banned)
+		}
+	}
+}

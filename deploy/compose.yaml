@@ -11,8 +11,14 @@
 # The service publishes no port. Whatever carries webhook deliveries to it
 # joins the `edge` network and reaches it at receiver:8080.
 #
-# The webhook secret is a file, never an environment variable. The file
-# `secrets/webhook_secret` must be readable by the numeric user below.
+# Both secrets are files, never environment variables: `secrets/webhook_secret`
+# for the receiver and `secrets/tunnel_token` for the tunnel connector. Compose
+# bind-mounts each file as it is, so the host file itself must be readable by
+# the numeric user below (65532), for example owned by 65532 with mode 0400.
+#
+# The tunnel connector makes outbound connections only. Its route, which
+# sends `POST /webhook` to `http://receiver:8080` and nothing else, is set in
+# Cloudflare, because a token-run connector takes its routes from there.
 name: github-metrics
 
 services:
@@ -48,9 +54,51 @@ services:
         max-size: 10m
         max-file: "3"
 
+  tunnel:
+    image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+    restart: unless-stopped
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --metrics
+      - 127.0.0.1:2000
+      - run
+      - --token-file
+      - /run/secrets/tunnel_token
+    secrets:
+      - tunnel_token
+    depends_on:
+      receiver:
+        condition: service_healthy
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "cloudflared", "tunnel", "--metrics", "127.0.0.1:2000", "ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
 secrets:
   webhook_secret:
     file: ./secrets/webhook_secret
+  tunnel_token:
+    file: ./secrets/tunnel_token
 
 networks:
   edge: {}
