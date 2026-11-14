@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright Tony Burns
+
+---
+# The receiver, as a Compose project. Start it with deploy/up.sh, which takes
+# the published image with its digest (`ghcr.io/<owner>/github-metrics@sha256:...`,
+# from the publish workflow's job summary) and refuses any other reference, a
+# tag included. Compose alone only refuses an unset GITHUB_METRICS_IMAGE.
+#
+# The service publishes no port. Whatever carries webhook deliveries to it
+# joins the `edge` network and reaches it at receiver:8080.
+#
+# The webhook secret is a file, never an environment variable. The file
+# `secrets/webhook_secret` must be readable by the numeric user below.
+name: github-metrics
+
+services:
+  receiver:
+    image: ${GITHUB_METRICS_IMAGE:?start with deploy/up.sh, which sets the image digest}
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 64m
+    cpus: 0.5
+    pids_limit: 128
+    restart: unless-stopped
+    environment:
+      LISTEN_ADDR: ":8080"
+      WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
+    secrets:
+      - webhook_secret
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD", "/github-metrics", "-healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+        max-file: "3"
+
+secrets:
+  webhook_secret:
+    file: ./secrets/webhook_secret
+
+networks:
+  edge: {}
