@@ -2,9 +2,10 @@
 # Copyright Tony Burns
 
 ---
-# The receiver, as a Compose project. GITHUB_METRICS_IMAGE must name the
-# published image with its digest (`ghcr.io/<owner>/github-metrics@sha256:...`,
-# from the publish workflow's job summary); Compose refuses to start without it.
+# The receiver, as a Compose project. Start it with deploy/up.sh, which takes
+# the published image with its digest (`ghcr.io/<owner>/github-metrics@sha256:...`,
+# from the publish workflow's job summary) and refuses any other reference, a
+# tag included. Compose alone only refuses an unset GITHUB_METRICS_IMAGE.
 #
 # The service publishes no port. Whatever carries webhook deliveries to it
 # joins the `edge` network and reaches it at receiver:8080.
@@ -15,7 +16,7 @@ name: github-metrics
 
 services:
   receiver:
-    image: ${GITHUB_METRICS_IMAGE:?set GITHUB_METRICS_IMAGE to the image with its @sha256 digest}
+    image: ${GITHUB_METRICS_IMAGE:?start with deploy/up.sh, which sets the image digest}
     user: "65532:65532"
     read_only: true
     tmpfs:

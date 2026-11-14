@@ -3,8 +3,8 @@
 
 ---
 # Publishes the container image to GitHub's container registry on each push
-# to main. The job summary names the image digest, and the Compose file in
-# deploy/ takes that digest, so a deploy never runs a tag.
+# to main, and the job refuses any other ref. The job summary names the image
+# digest, and deploy/up.sh takes that digest, so a deploy never runs a tag.
 name: publish
 
 on:
@@ -21,6 +21,8 @@ concurrency:
 jobs:
   image:
     name: image
+    # workflow_dispatch can run from any branch; only main publishes.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:

@@ -101,6 +101,7 @@ nogo(
 GO_TARGETS = [
     "//cmd/github-metrics:github-metrics_lib",
     "//internal/receiver",
+    "//deploy:deploy_test",
     "//internal/receiver:receiver_test",
     "//internal/version",
     "//internal/version:version_test",
