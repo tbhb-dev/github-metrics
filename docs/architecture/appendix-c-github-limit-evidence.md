@@ -66,7 +66,7 @@ The receiver exists today. The design plans the rest of its delivery handling.
 | The PR files endpoint is under Pull requests read | Existing, re-read 2026-11-13 | Permissions required for GitHub Apps |
 | The issue timeline endpoint accepts either Issues read or Pull requests read | Existing | Permissions required for GitHub Apps |
 | The manifest keys are `default_permissions` and `default_events` | Existing | Registering an App from a manifest |
-| The permission keys are `pull_requests` and `metadata` | Existing | GitHub App endpoints, "Create an installation access token for an app." Its `permissions` body uses these names, and the manifest flow in plan step 7 of the design confirms them |
+| The permission keys are `pull_requests` and `metadata` | New | GitHub App endpoints, "Create an installation access token for an app." Its `permissions` body uses these names. The manifest flow in plan step 7 of the design hasn't run yet, so it doesn't confirm them |
 
 ## Payload content and timeline events
 
