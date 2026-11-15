@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
+	boltErrors "go.etcd.io/bbolt/errors"
+
 	"github.com/tbhb-dev/github-metrics/internal/store"
 )
 
@@ -220,24 +223,117 @@ func TestCreatedIsRecordedOnce(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "store.db")
-	before := time.Now()
-	repo := open(t, path)
-	after := time.Now()
+	first := time.Date(2026, time.November, 15, 12, 0, 0, 123456789, time.UTC)
+	later := first.Add(time.Hour)
 
-	created := repo.Created()
-	if created.Before(before.Truncate(time.Nanosecond)) || created.After(after) {
-		t.Fatalf("Created = %v, want between %v and %v", created, before, after)
+	repo, err := store.OpenAt(path, func() time.Time { return first })
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
 	}
 
-	err := repo.Close()
+	if !repo.Created().Equal(first) {
+		t.Fatalf("Created = %v, want %v", repo.Created(), first)
+	}
+
+	err = repo.Close()
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 
-	again := open(t, path)
-	if !again.Created().Equal(created) {
-		t.Fatalf("Created after reopen = %v, want %v", again.Created(), created)
+	// The second open runs on a later clock and must keep the first time.
+	again, err := store.OpenAt(path, func() time.Time { return later })
+	if err != nil {
+		t.Fatalf("OpenAt again: %v", err)
 	}
+
+	if !again.Created().Equal(first) {
+		t.Fatalf("Created after reopen = %v, want %v", again.Created(), first)
+	}
+
+	err = again.Close()
+	if err != nil {
+		t.Fatalf("Close again: %v", err)
+	}
+
+	raw := storedCreated(t, path)
+
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("parse stored creation time %q: %v", raw, err)
+	}
+
+	if !parsed.Equal(repo.Created()) {
+		t.Fatalf("stored creation time = %v, want %v", parsed, repo.Created())
+	}
+}
+
+// storedCreated reads the creation-time text straight from the file.
+func storedCreated(t *testing.T, path string) string {
+	t.Helper()
+
+	opts := *bolt.DefaultOptions
+	opts.ReadOnly = true
+	opts.Timeout = time.Second
+
+	file, err := bolt.Open(path, 0o600, &opts)
+	if err != nil {
+		t.Fatalf("open the file directly: %v", err)
+	}
+
+	defer func() { _ = file.Close() }()
+
+	var text string
+
+	err = file.View(func(txn *bolt.Tx) error {
+		text = string(txn.Bucket([]byte("meta")).Get([]byte("created")))
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read the creation time: %v", err)
+	}
+
+	return text
+}
+
+// TestOpenWhileLockedTimesOut allows ten seconds for the one-second lock wait.
+func TestOpenWhileLockedTimesOut(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "store.db")
+	held := open(t, path)
+
+	result := make(chan error, 1)
+
+	go func() {
+		other, err := store.Open(path)
+		if other != nil {
+			_ = other.Close()
+		}
+
+		result <- err
+	}()
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, boltErrors.ErrTimeout) {
+			t.Fatalf("second Open err = %v, want bbolt's ErrTimeout", err)
+		}
+	case <-time.After(10 * time.Second):
+		// Release the waiter before the temporary directory is removed.
+		_ = held.Close()
+		waitErr := <-result
+
+		t.Fatalf("second Open exceeded the ten-second bound: %v", waitErr)
+	}
+
+	err := held.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Once the holder closes, the file opens again.
+	open(t, path)
 }
 
 func TestNewFileMode(t *testing.T) {

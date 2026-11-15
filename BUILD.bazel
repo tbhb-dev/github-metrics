@@ -27,6 +27,7 @@ load(
     "zizmor_test",
 )
 load("@tbhb_rules//repo:defs.bzl", "repo_files")
+load("@tbhb_rules_go//:defs.bzl", "go_mod_tidy_test", "gomutants_test")
 load("//:vale_packages.bzl", "VALE_PACKAGES")
 load("//tools/lint:linters.bzl", "golangci_lint_test")
 
@@ -119,10 +120,28 @@ golangci_lint_test(
     expect_linted = [":repo_files"],
 )
 
-# go mod tidy, mutation and condition-coverage checks need a module proxy
-# directory built from go.sum, which has nothing to list until the first
-# dependency lands. The receiver uses only the standard library, so they
-# arrive with the first dependency.
+go_mod_tidy_test(
+    name = "go_mod_tidy_test",
+    srcs = [":repo_files"],
+    go_mod = "go.mod",
+    go_sum = "go.sum",
+    proxy = "@go_mod_proxy//:proxy",
+)
+
+# PR runs report survivors without failing. A blocking nightly full run
+# is a later change.
+gomutants_test(
+    name = "store_mutation_test",
+    advisory = True,
+    cpus = 4,
+    go_mod = "go.mod",
+    go_sum = "go.sum",
+    proxy = "@go_mod_proxy//:proxy",
+    tests = ["//internal/store:store_test"],
+)
+
+# gobco_test is available, but its type checker cannot resolve the test-only
+# OpenAt export. Condition coverage waits for that support.
 
 # Every file of the repository, for the whole-tree checks below. Each package
 # calls repo_files() too, so the chain covers the tree. Directories that hold
