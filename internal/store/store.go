@@ -33,12 +33,13 @@ const (
 
 // The bucket and key names of the file. Changing one orphans the data in it.
 const (
-	metaBucket       = "meta"
-	queueBucket      = "queue"
-	queueIDsBucket   = "queue_deliveries"
-	bodiesBucket     = "dedupe_bodies"
-	deliveriesBucket = "dedupe_deliveries"
-	createdKey       = "created"
+	metaBucket        = "meta"
+	queueBucket       = "queue"
+	queueIDsBucket    = "queue_deliveries"
+	queueEventsBucket = "queue_events"
+	bodiesBucket      = "dedupe_bodies"
+	deliveriesBucket  = "dedupe_deliveries"
+	createdKey        = "created"
 )
 
 // ErrDeliveryReused is returned by Enqueue for a delivery ID that the dedupe
@@ -66,6 +67,8 @@ const (
 type Entry struct {
 	// Delivery is the `X-GitHub-Delivery` ID that came with the body.
 	Delivery string
+	// Event is the checked X-GitHub-Event header.
+	Event string
 	// Body is the raw signed body.
 	Body []byte
 	// Seq orders the queue by arrival and names the entry for Remove.
@@ -83,7 +86,7 @@ type Store interface {
 	// same. Otherwise the body hash and the delivery ID go into the
 	// table, the body goes onto the queue, and the data is synced to disk
 	// before Enqueue returns. On any other error the transaction rolls back.
-	Enqueue(delivery string, body []byte) (Outcome, error)
+	Enqueue(delivery, event string, body []byte) (Outcome, error)
 	// Pending returns up to limit queued entries in arrival order. A limit
 	// under 1 returns none.
 	Pending(limit int) ([]Entry, error)
@@ -139,7 +142,7 @@ func open(path string, now func() time.Time) (*Bolt, error) {
 // initialize creates the buckets and returns the stored creation time. When
 // the file has none yet, it stores first.
 func initialize(txn *bolt.Tx, first time.Time) (time.Time, error) {
-	for _, name := range []string{queueBucket, queueIDsBucket, bodiesBucket, deliveriesBucket} {
+	for _, name := range []string{queueBucket, queueIDsBucket, queueEventsBucket, bodiesBucket, deliveriesBucket} {
 		_, err := txn.CreateBucketIfNotExists([]byte(name))
 		if err != nil {
 			return time.Time{}, fmt.Errorf("create bucket %s: %w", name, err)
@@ -186,7 +189,7 @@ func (b *Bolt) Close() error {
 
 // Enqueue is Store.Enqueue. A `bbolt` update commits with a disk sync, and the
 // store leaves NoSync off, so the commit is durable when Update returns.
-func (b *Bolt) Enqueue(delivery string, body []byte) (Outcome, error) {
+func (b *Bolt) Enqueue(delivery, event string, body []byte) (Outcome, error) {
 	if delivery == "" {
 		return 0, ErrNoDelivery
 	}
@@ -203,7 +206,7 @@ func (b *Bolt) Enqueue(delivery string, body []byte) (Outcome, error) {
 			return nil
 		}
 
-		return appendDelivery(txn, delivery, body, hash[:], stamp)
+		return appendDelivery(txn, delivery, event, body, hash[:], stamp)
 	})
 	if err != nil {
 		return 0, fmt.Errorf("enqueue: %w", err)
@@ -213,7 +216,7 @@ func (b *Bolt) Enqueue(delivery string, body []byte) (Outcome, error) {
 }
 
 // appendDelivery records a delivery with a new body and queues the body.
-func appendDelivery(txn *bolt.Tx, delivery string, body, hash, stamp []byte) error {
+func appendDelivery(txn *bolt.Tx, delivery, event string, body, hash, stamp []byte) error {
 	deliveries := txn.Bucket([]byte(deliveriesBucket))
 	if deliveries.Get([]byte(delivery)) != nil {
 		return ErrDeliveryReused
@@ -248,6 +251,11 @@ func appendDelivery(txn *bolt.Tx, delivery string, body, hash, stamp []byte) err
 		return fmt.Errorf("append delivery ID to queue: %w", err)
 	}
 
+	err = txn.Bucket([]byte(queueEventsBucket)).Put(key, []byte(event))
+	if err != nil {
+		return fmt.Errorf("append event to queue: %w", err)
+	}
+
 	return nil
 }
 
@@ -274,6 +282,7 @@ func (b *Bolt) Pending(limit int) ([]Entry, error) {
 			entries = append(entries, Entry{
 				Seq:      binary.BigEndian.Uint64(key),
 				Delivery: string(delivery),
+				Event:    string(txn.Bucket([]byte(queueEventsBucket)).Get(key)),
 				Body:     bytes.Clone(body),
 			})
 		}
@@ -300,6 +309,11 @@ func (b *Bolt) Remove(seq uint64) error {
 		err = txn.Bucket([]byte(queueIDsBucket)).Delete(key)
 		if err != nil {
 			return fmt.Errorf("delete delivery ID: %w", err)
+		}
+
+		err = txn.Bucket([]byte(queueEventsBucket)).Delete(key)
+		if err != nil {
+			return fmt.Errorf("delete event: %w", err)
 		}
 
 		return nil
