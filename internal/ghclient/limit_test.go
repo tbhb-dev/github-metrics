@@ -241,7 +241,7 @@ func TestResetBoundsAreValid(t *testing.T) {
 		reset           string
 		atLeast, atMost time.Duration
 	}{
-		{"60", 2 * time.Second, 10 * time.Second},
+		{"60", 3 * time.Second, 3 * time.Second},
 		{"4102444800", 59 * time.Minute, time.Hour + time.Minute},
 	} {
 		synctestRun(t, func(ctx context.Context) {
