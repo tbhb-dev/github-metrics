@@ -2,10 +2,11 @@
 // Copyright Tony Burns
 
 // Package receiver accepts GitHub webhook deliveries. It authenticates each
-// delivery and answers 202. It stores and processes nothing yet.
+// delivery and queues the body in the store before it answers 202.
 package receiver
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +16,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+
+	"github.com/tbhb-dev/github-metrics/internal/store"
 )
 
 // MaxBody is GitHub's largest webhook payload, 25 MiB.
@@ -32,23 +35,21 @@ var (
 // Handler serves GET /healthz and POST /webhook. Every other request, and a
 // non-POST request to /webhook, gets 404. It dispatches on the exact method
 // and path, with no path cleaning, so "//webhook" is a 404 and not a redirect.
-func Handler(secret []byte, log *slog.Logger) http.Handler {
+func Handler(secret []byte, repo store.Store, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/healthz":
 			resp.WriteHeader(http.StatusOK)
 		case req.Method == http.MethodPost && req.URL.Path == "/webhook":
-			webhook(resp, req, secret, log)
+			webhook(resp, req, secret, repo, log)
 		default:
 			resp.WriteHeader(http.StatusNotFound)
 		}
 	})
 }
 
-// webhook authenticates the delivery without buffering it. The body streams
-// into the hash and is discarded, which holds an unauthenticated request to a
-// constant amount of memory.
-func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, log *slog.Logger) {
+// webhook authenticates the delivery and queues the body in the store.
+func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, repo store.Store, log *slog.Logger) {
 	want, ok := parseSignature(secret, req.Header.Get("X-Hub-Signature-256"))
 	if !ok {
 		reject(resp, req, log)
@@ -56,9 +57,11 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, log *sl
 		return
 	}
 
+	var body bytes.Buffer
+
 	mac := hmac.New(sha256.New, secret)
 
-	size, err := io.Copy(mac, http.MaxBytesReader(resp, req.Body, MaxBody))
+	size, err := io.Copy(mac, io.TeeReader(http.MaxBytesReader(resp, req.Body, MaxBody), &body))
 	if err != nil {
 		_, tooLarge := errors.AsType[*http.MaxBytesError](err)
 		if tooLarge {
@@ -88,11 +91,34 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, log *sl
 		return
 	}
 
+	outcome, err := repo.Enqueue(delivery, body.Bytes())
+	if err != nil {
+		log.ErrorContext(req.Context(), "enqueue delivery",
+			"delivery", oneLine(delivery),
+			"event", oneLine(event),
+			"error", err)
+		resp.WriteHeader(http.StatusInternalServerError)
+
+		return
+	}
+
+	result := "enqueued"
+	if outcome == store.Duplicate {
+		result = "duplicate"
+	}
+
 	log.InfoContext(req.Context(), "accepted delivery",
 		"delivery", delivery,
 		"event", event,
-		"bytes", size)
+		"bytes", size,
+		"outcome", result)
 	resp.WriteHeader(http.StatusAccepted)
+}
+
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+
+	return strings.ReplaceAll(s, "\r", "")
 }
 
 func reject(resp http.ResponseWriter, req *http.Request, log *slog.Logger) {
