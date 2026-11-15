@@ -116,11 +116,19 @@ Gauges, read from the store at each collection:
 
 The store gains an open-PR table with the node ID, repository, author type, and `created_at` of each open PR. The worker adds a row when a PR opens or reopens and removes it at merge or close, and the reconciler repairs rows that a missed webhook left wrong. A repository with no open PR reports 0 for the count and omits the age. When the service is down, both series go stale and the dashboard goes empty. Gauge values are state, so they can't double count, and a lost store refills from the backfill.
 
-A planned instrument, `github.pull_request.time_from_launch_to_merge`, starts at a `started_at` value in the agent identity trailers of the PR's commits. It waits for the tools that write the trailers to add it, and the worker would read that one value and drop the rest of the commit message. The trailer's exact format is unverified.
+The cycle time histogram runs from the start of the first agent run that contributed to the PR until the PR ends:
+
+| Instrument | Start | End | Extra attributes |
+| --- | --- | --- | --- |
+| `github.pull_request.cycle_time` | The earliest of every `started_at` on an identity trailer line in the PR's commits or body, and the date of the PR's earliest commit | `merged_at`, or `closed_at` for a PR closed without a merge | `vcs.change.state`: `merged` or `closed`. `github.pull_request.start_source`: `started_at` or `commit`, whichever supplied the start |
+
+The start is the earliest of all those times, so a non-agent commit that predates the first agent launch sets the start. Without any `started_at` in its trailers, a PR starts at its earliest commit and records `commit` as the source. Until the tools that write the trailers add `started_at`, every PR records `commit`. The field and its format come from the start-time design in `tbhb-dev/wiki-private#419`, and the worker reads only that field and drops the rest of the trailer text (the exact format is unverified). Work before the first agent run or commit doesn't count.
+
+Only the first end of a PR counts. If a reopened PR ends again, the stored `ended` milestone blocks a second observation.
 
 Every histogram is an exponential (native) histogram, with the SDK's default limit of 160 buckets. Over a range of 1 second to 30 days, 160 buckets give a scale of 2, which means each bucket spans a ratio of about 1.19 and a quantile estimate is off by about 9% at most. The 600 s and 900 s goal thresholds sit inside a bucket, not on an edge, so a goal check has the same error. D15 records the choice, the fallback, and the backend check. Each attribute set exports one native histogram series, with the count and sum inside it, if Mimir ingests native histograms (unverified).
 
-The metric attributes are `vcs.repository.name`, and `github.author.type` with the values `user` or `bot`. The review counter adds `github.review.state`.
+The metric attributes are `vcs.repository.name`, and `github.author.type` with the values `user` or `bot`. The review counter adds `github.review.state`, and the cycle time histogram adds `vcs.change.state` and `github.pull_request.start_source`.
 
 ### Direct metrics, not derived from traces
 
@@ -133,15 +141,16 @@ The service records durations itself because Tempo's metrics generator can't der
 | `vcs.repository.name` | About 50 | Tens of repositories today, with headroom |
 | `github.author.type` | 2 | `user` or `bot` |
 
-Each instrument has 50 × 2 = 100 attribute sets, and the review counter has 400 with its four states. The table counts series, with native histograms and then with the explicit-bucket fallback of D15, which has 15 boundaries, 16 buckets, a sum, and a count, so 18 series per attribute set.
+Each instrument has 50 × 2 = 100 attribute sets. The review states give the review counter 400, and the end states and start sources give the cycle time histogram 400. Series counts below are for native histograms and for the explicit-bucket fallback of D15, which has 15 boundaries, 16 buckets, a sum, and a count, so 18 series per attribute set.
 
 | Instruments | Native histograms | Explicit fallback |
 | --- | --- | --- |
 | 10 histograms, 100 attribute sets each | 1,000 | 18,000 |
+| Cycle time histogram, 400 attribute sets | 400 | 7,200 |
 | Merged counter, 100 attribute sets | 100 | 100 |
 | Review counter, 400 attribute sets | 400 | 400 |
 | 2 gauges, 100 attribute sets each | 200 | 200 |
-| Total | 1,700 | 18,700 |
+| Total | 2,100 | 25,900 |
 
 A cardinality limit in the SDK caps every instrument at 2,000 attribute sets. Sets beyond the cap fold into its overflow series.
 
@@ -149,7 +158,7 @@ The author's login stays out. Public repositories accept PRs from anyone, which 
 
 ### Recording rule
 
-1. After each reconcile, the worker checks the PR's milestones. The first three durations are milestones of their own, and the merge is a fourth milestone, `merged`, that triggers every other merge-time instrument. Each submitted review is a milestone keyed by the review's node ID.
+1. After each reconcile, the worker checks the PR's milestones. The first three durations are milestones of their own. The merge is a fourth milestone, `merged`, that triggers every other merge-time instrument. The first merge or close is a fifth, `ended`, that triggers the cycle time histogram. Each submitted review is a milestone keyed by the review's node ID.
 2. Eligibility needs GitHub's state to show the milestone and the store to lack a record of it, provided the milestone's end timestamp is both less than 24 hours old and later than the store's creation time. Each milestone counts once, keyed by the PR's node ID and the milestone name, or by the review's node ID for a review.
 3. Next, the worker commits `(N, milestone)` to the store in its own synced transaction.
 4. Only after that commit succeeds does the worker record the observation. For `merged`, that means the merged counter and the commit-to-merge, approval-to-merge, commits, changed-lines, and reviewed-heads histograms in one pass. If the commit fails, the worker doesn't record anything, and the next reconcile tries again.
@@ -163,13 +172,13 @@ Today the 20-minute report's timing table comes from a prefill script that reads
 
 Recording rules in Mimir compute, per repository over 24 hours, the median and p95 of first commit to merge, first commit to open, and last commit to merge, plus the count of merged PRs. They also compute a goal flag per repository, `met` or `missed`, for the two repositories with a stated goal. The goal is a median of 10 minutes and a p95 of 15 minutes from first commit to merge, for `tools` and `ops` (the figures are from the operator's direction, and no code or report script records them yet). With native histograms the flag reads the quantile directly, with the error that D15 states.
 
-A Grafana dashboard then shows the rule outputs, the open PR count and oldest open age, the review counter by state, and the size histograms. It replaces the prefill timing table. Both live in the platform repository's observability configuration, not in this one, and step 8 of the plan covers them.
+A Grafana dashboard then shows the rule outputs, the open PR count and oldest open age, the review counter by state, the cycle time by end state and start source, and the size histograms. It replaces the prefill timing table. Both live in the platform repository's observability configuration, not in this one, and step 8 of the plan covers them.
 
 ### Metric loss on a crash
 
 Metrics leave through the SDK's periodic reader every 60 seconds with cumulative aggregation, which keeps running totals in memory instead of a queue of observations. A crash or restart loses every observation recorded since the last export the collector accepted. That's normally at most 60 seconds. During a collector outage, though, the loss covers the whole outage, with no time bound.
 
-Memory use doesn't grow during an outage, because cumulative state keeps one total per attribute set, capped at 18,700 series. Lost observations stay lost, since the worker already committed their milestones and won't record them a second time. Backends see a counter reset.
+Memory use doesn't grow during an outage, because cumulative state keeps one total per attribute set, capped at 25,900 series. Lost observations stay lost, since the worker already committed their milestones and won't record them a second time. Backends see a counter reset.
 
 ### Store loss and restore
 
