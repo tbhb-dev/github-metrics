@@ -1,8 +1,8 @@
 # Appendix B: permissions, manifest keys, and events
 
-> Today versus design: this page describes the design. The code has a webhook receiver, a request budget, and a GitHub client, and nothing in it creates, installs, or checks a GitHub App. The wiki design says what follows, and this repo can't verify the live App, its installed permissions or subscriptions, or the webhook route.
+> Today versus design: this page describes the design. The code has a webhook receiver, a request budget, and a GitHub client, and nothing in it creates, installs, or checks a GitHub App. The original design says what follows, and this repo can't verify the live App, its installed permissions or subscriptions, or the webhook route.
 
-This appendix moves the App permissions, the manifest keys, and the excluded events out of the wiki design. Section 3 and decisions 0001 and 0011 give the short forms.
+This appendix moves the App permissions, the manifest keys, and the excluded events out of the original design. Section 3 and decisions 0001 and 0011 give the short forms.
 
 ## Permissions (design)
 
@@ -25,7 +25,7 @@ Today only the first two rows matter to the design. Each installation token requ
 | `pull_request` | `opened`, `closed`, `reopened`, `synchronize`, `review_requested`, `review_request_removed`, `ready_for_review`, `converted_to_draft` | Pull requests read | Lifecycle changes and review requests, as a prompt to reconcile |
 | `pull_request_review` | `submitted`, `dismissed` | Pull requests read | First review and approval milestones, as a prompt to reconcile |
 
-The planned worker ignores every other action of these events, such as `edited` or `labeled`. Each App also receives `installation` and `installation_repositories` by default without subscribing (unverified: the wiki design states it without a GitHub citation). The design uses an `installation_repositories` body that lists `repositories_added` to start a backfill of each newly added repository, as section 6 shows.
+The planned worker ignores every other action of these events, such as `edited` or `labeled`. Each App also receives `installation` and `installation_repositories` by default without subscribing (unverified: the original design states it without a GitHub citation). The design uses an `installation_repositories` body that lists `repositories_added` to start a backfill of each newly added repository, as section 6 shows.
 
 ## Deliberately excluded events (design)
 
@@ -42,7 +42,7 @@ A later subscription to an excluded event doesn't need a permission change, beca
 
 ## Manifest keys (design)
 
-The App manifest sets two keys. `default_permissions` lists every read-only permission for repositories and the organization, and `default_events` lists the two subscribed events. The wiki design gives these 47 key names but no source page, and nobody has checked them against GitHub's "Permissions required for GitHub Apps" reference yet, so treat them as unverified. The manifest also sets `public` to `false` and puts the webhook URL of the planned public tunnel route under `hook_attributes`.
+The App manifest sets two keys. `default_permissions` lists every read-only permission for repositories and the organization, and `default_events` lists the two subscribed events. The original design gives these 47 key names but no source page, and nobody has checked them against GitHub's "Permissions required for GitHub Apps" reference yet, so treat them as unverified. The manifest also sets `public` to `false` and puts the webhook URL of the planned public tunnel route under `hook_attributes`.
 
 ```json
 {

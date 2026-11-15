@@ -16,3 +16,4 @@ Each decision has its own record under `decisions/`, with its rule, how to undo 
 | [D10](decisions/0010-repository-and-author-type-are-the-only-metric-a.md) | Repository and author type are the only metric attributes |
 | [D11](decisions/0011-checks-issue-comments-pushes-and-review-threads.md) | Checks, issue comments, pushes, and review threads stay out of the first release |
 | [D12](decisions/0012-telemetry-contains-no-pr-titles-bodies-comment-t.md) | Telemetry contains no PR titles, bodies, comment text, or diffs |
+| [D13](decisions/0013-the-boundary-with-the-organization-collector-pen.md) | The boundary with the organization collector, pending its owner |

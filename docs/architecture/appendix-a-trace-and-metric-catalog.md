@@ -1,8 +1,8 @@
 # Appendix A: trace and metric catalog
 
-> Today versus design: this page describes the design, not running code. The code has a webhook receiver, a request budget, and a GitHub client. The worker, reconciler, store, and OpenTelemetry (OTel) export remain ahead. The wiki design is the source of each rule.
+> Today versus design: this page describes the design, not running code. The code has a webhook receiver, a request budget, and a GitHub client. The worker, reconciler, store, and OpenTelemetry (OTel) export remain ahead. The original design is the source of each rule.
 
-The wiki design specifies the planned trace of one pull request (PR) and the planned metrics. Every rule here is new, proposed by that design.
+The original design specifies the planned trace of one pull request (PR) and the planned metrics. Every rule here is new, proposed by that design.
 
 ## ID derivation
 
@@ -49,7 +49,7 @@ Root events take GitHub's timestamps, and every one of them comes from the REST 
 - `ready_for_review` and `convert_to_draft`, from the timeline events of the same names.
 - `head_ref_force_pushed`, from the timeline.
 
-The design doesn't record review thread resolution. Neither the REST timeline nor the review comment endpoints expose a thread's resolved state, according to the GitHub Docs pages the wiki design cites. A webhook payload has no GitHub timestamp for the change (unverified), and telemetry content comes only from REST responses, never from a webhook body. For that reason, the planned App doesn't subscribe to `pull_request_review_thread`.
+The design doesn't record review thread resolution. Neither the REST timeline nor the review comment endpoints expose a thread's resolved state, according to the GitHub Docs pages the original design cites. A webhook payload has no GitHub timestamp for the change (unverified), and telemetry content comes only from REST responses, never from a webhook body. For that reason, the planned App doesn't subscribe to `pull_request_review_thread`.
 
 Review comments don't get a span or an attribute, because the service doesn't read comment text and a submitted review already marks the moment.
 
@@ -70,7 +70,7 @@ Review comments don't get a span or an attribute, because the service doesn't re
 | `vcs.ref.head.revision` | Commit | The commit hash |
 | `github.event.name` | Event | `ready_for_review` |
 
-The `vcs.*` names follow the OTel semantic conventions for version control, which are still in development, so their exact names are unverified. Names under `github.*` are this service's own. Titles, bodies, comment text, and diffs never appear. Repository names, branch names, logins, and team slugs from private repositories do appear, and the wiki design's section "Data the service keeps and sends" covers who sees them.
+The `vcs.*` names follow the OTel semantic conventions for version control, which are still in development, so their exact names are unverified. Names under `github.*` are this service's own. Titles, bodies, comment text, and diffs never appear. Repository names, branch names, logins, and team slugs from private repositories do appear, and the original design's section "Data the service keeps and sends" covers who sees them.
 
 ## Metric catalog
 
@@ -117,4 +117,4 @@ The store is the record of what the service already exported, so losing it or ro
 
 - **Lost or corrupt store.** The service starts with a new empty store and records the store's creation time. The backfill then exports every span of every PR in scope a second time with the same IDs, and the backend's handling of those duplicates is unverified. Metrics don't double, because step 2 skips any milestone that ended before the store's creation time.
 - **Restored older snapshot.** The operator must not restore an older copy of the store, because the snapshot keeps its old creation time. If someone restores one anyway, every span exported after the snapshot exports again, and every milestone counted after the snapshot that's still under 24 hours old counts twice.
-- **Instead of a restore,** the operator deletes the damaged file and lets the service start empty. The wiki design's threat-model follow-up sets the store's file modes and corruption handling, and it decides whether anyone backs up the store at all.
+- **Instead of a restore,** the operator deletes the damaged file and lets the service start empty. The original design's threat-model follow-up sets the store's file modes and corruption handling, and it decides whether anyone backs up the store at all.

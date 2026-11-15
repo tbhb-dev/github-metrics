@@ -2,7 +2,7 @@
 
 Today the code has only the webhook receiver, the request budget, and the GitHub client. Everything else is design or planned. Still to build are the worker, the reconciler, the store, and the OTel export. Treat every statement about them as a plan.
 
-Each section below covers one option the design didn't take, and why. A section links the decision record that an option would undo. Appendix B of the design in the tbhb-dev wiki, under `drafts/github-metrics`, is the source.
+Each section below covers one option the design didn't take, and why. A section links the decision record that an option would undo. Appendix B of the original design, in the `drafts/github-metrics` folder of `tbhb-dev/wiki` at commit `8e06fb1`, is the source.
 
 | Option not taken | Decision record |
 | --- | --- |

@@ -16,7 +16,7 @@ A `429`, or a `403` that cites a secondary limit, backs the budget off from one 
 
 ## Security
 
-Only a request with a valid signature reads or writes state. Tokens come from the `TokenSource` interface in `ghclient`, and `main` builds no client yet. The wiki design has the service sign the installation JSON Web Token with the App private key, mounted as a read-only file. No record covers another source of tokens. Secrets are files.
+Only a request with a valid signature reads or writes state. Tokens come from the `TokenSource` interface in `ghclient`, and `main` builds no client yet. The original design has the service sign the installation JSON Web Token with the App private key, mounted as a read-only file. No record covers another source of tokens. Secrets are files.
 
 ## Telemetry content
 
@@ -24,7 +24,7 @@ Spans hold repository and branch names, PR numbers, logins, team slugs, states, 
 
 ## Logging
 
-Today `main` logs JSON to standard output. The design adds a second handler that exports each record to the collector as an `OTLP` log, with `deployment.environment.name` set. Loki should index it as a label. Page 11's export spike checks that. In the design, each log line has the delivery ID, the event, and the result, and no body, credential, or signature header. Because the `HMAC` covers only the body, a replayed valid body can arrive with any header text. Today the receiver logs `X-GitHub-Delivery` and `X-GitHub-Event` only when they match fixed patterns: 1 to 64 letters, digits, or hyphens for the delivery ID, and 1 to 64 lowercase letters, digits, or `_` for the event. Anything else gets `400` and a log line with a fixed reason.
+Today `main` logs JSON to standard output. The design adds a second handler that exports each record to the collector as an `OTLP` log, with `deployment.environment.name` set. Loki should index it as a label. Page 11's export spike checks that. In the design, each log line has the delivery ID, the event, and the result, and no body, credential, or signature header. Because the `HMAC` covers only the body, a replayed valid body can arrive with any header text. Today the receiver logs `X-GitHub-Delivery` and `X-GitHub-Event` only when they match fixed patterns: 1 to 64 letters, digits, or hyphens for the delivery ID, and 1 to 64 lowercase letters, digits, or `_` for the event. Anything else gets `400` and a log line with a fixed reason. In the design, logs use the SDK's batch log processor and keep nothing in the store. A collector outage drops the records the exporter can't send, and standard output still has them (source: wiki#56).
 
 ## Testing
 
