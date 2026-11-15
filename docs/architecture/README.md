@@ -26,16 +26,24 @@ The service is under construction. Each page says what exists on main and what t
 
 ## Diagrams
 
-`workspace.dsl` is the source. The images in `diagrams/` come from it with the Structurizr command-line tool and PlantUML, using these commands in this directory:
+`workspace.dsl` is the source. The files in `diagrams/` come from it with the Structurizr command-line tool and PlantUML, using these commands in this directory:
 
 ```sh
 structurizr export -workspace workspace.dsl -format plantuml -output ./out
 plantuml -tsvg ./out/structurizr-{SystemContext,Containers,Components}.puml
-mv ./out/*.svg diagrams/
+plantuml -tpng ./out/structurizr-{SystemContext,Containers,Components}.puml
+structurizr export -workspace workspace.dsl -format json -output ./out
+mv ./out/*.svg ./out/*.png ./out/workspace.json diagrams/
 ```
 
-The operator plans a Bazel target to check the workspace file and write the images. That target hasn't merged, and it replaces these hand-run exports. The pages link these files:
+The pages link the SVG files. Each Portable Network Graphics (PNG) file shows the same view as the SVG file of the same name, for readers and tools that can't display SVG. `workspace.json` is the same workspace in the Structurizr JSON format, for tools that read JSON instead of the `workspace.dsl` syntax.
 
 - `diagrams/structurizr-SystemContext.svg`
 - `diagrams/structurizr-Containers.svg`
 - `diagrams/structurizr-Components.svg`
+- `diagrams/structurizr-SystemContext.png`
+- `diagrams/structurizr-Containers.png`
+- `diagrams/structurizr-Components.png`
+- `diagrams/workspace.json`
+
+No Bazel target lints the workspace file or checks these files for staleness yet, and the change that added the PNG and JSON files left that out on purpose. That work belongs to the shared rules targets requested from tbhb-dev/rules. The request covers `structurizr validate` as a test and a generate step with a staleness test. CI runs none of these exports until those targets exist. Until then, rerun the commands after each edit to `workspace.dsl` and commit the results.

@@ -1,0 +1,498 @@
+{
+  "configuration" : { },
+  "description" : "Turns GitHub pull request activity into OpenTelemetry traces, metrics, and logs. Today only the receiver, request budget, and GitHub client exist. The rest is design.",
+  "documentation" : { },
+  "id" : 0,
+  "model" : {
+    "people" : [ {
+      "description" : "Reads pull request timelines, timing metrics, and service logs in the observability backends.",
+      "id" : "1",
+      "name" : "Engineer",
+      "properties" : {
+        "structurizr.dsl.identifier" : "engineer"
+      },
+      "relationships" : [ {
+        "description" : "Reads traces",
+        "destinationId" : "13",
+        "id" : "37",
+        "sourceId" : "1",
+        "tags" : "Relationship"
+      }, {
+        "description" : "Reads metrics",
+        "destinationId" : "14",
+        "id" : "38",
+        "sourceId" : "1",
+        "tags" : "Relationship"
+      }, {
+        "description" : "Reads logs",
+        "destinationId" : "15",
+        "id" : "39",
+        "sourceId" : "1",
+        "tags" : "Relationship"
+      } ],
+      "tags" : "Element,Person"
+    } ],
+    "softwareSystems" : [ {
+      "description" : "Sends pull request webhooks and serves the REST API.",
+      "documentation" : { },
+      "id" : "2",
+      "name" : "GitHub",
+      "properties" : {
+        "structurizr.dsl.identifier" : "github"
+      },
+      "relationships" : [ {
+        "description" : "Delivers webhooks",
+        "destinationId" : "4",
+        "id" : "16",
+        "sourceId" : "2",
+        "tags" : "Relationship",
+        "technology" : "HTTPS"
+      }, {
+        "description" : "Delivers webhooks",
+        "destinationId" : "3",
+        "id" : "17",
+        "linkedRelationshipId" : "16",
+        "sourceId" : "2",
+        "technology" : "HTTPS"
+      } ],
+      "tags" : "Element,Software System,External"
+    }, {
+      "containers" : [ {
+        "description" : "Routes only POST /webhook from the public hostname to the service. Makes outbound connections only.",
+        "documentation" : { },
+        "id" : "4",
+        "name" : "Tunnel connector",
+        "properties" : {
+          "structurizr.dsl.identifier" : "tunnel"
+        },
+        "relationships" : [ {
+          "description" : "Forwards POST /webhook",
+          "destinationId" : "6",
+          "id" : "18",
+          "sourceId" : "4",
+          "tags" : "Relationship",
+          "technology" : "HTTP"
+        }, {
+          "description" : "Forwards POST /webhook",
+          "destinationId" : "5",
+          "id" : "19",
+          "linkedRelationshipId" : "18",
+          "sourceId" : "4",
+          "technology" : "HTTP"
+        } ],
+        "tags" : "Element,Container",
+        "technology" : "cloudflared"
+      }, {
+        "components" : [ {
+          "description" : "Verifies the signature while streaming the body, checks the delivery and event headers, then answers 202 or 400.",
+          "documentation" : { },
+          "id" : "6",
+          "name" : "Webhook receiver",
+          "properties" : {
+            "structurizr.dsl.identifier" : "receiver"
+          },
+          "relationships" : [ {
+            "description" : "Planned: queues deliveries",
+            "destinationId" : "11",
+            "id" : "20",
+            "sourceId" : "6",
+            "tags" : "Relationship"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "net/http"
+        }, {
+          "description" : "Planned. Turns the current state of a pull request into spans and metric observations.",
+          "documentation" : { },
+          "id" : "7",
+          "name" : "Worker",
+          "properties" : {
+            "structurizr.dsl.identifier" : "worker"
+          },
+          "relationships" : [ {
+            "description" : "Planned: reads queue, records spans",
+            "destinationId" : "11",
+            "id" : "22",
+            "sourceId" : "7",
+            "tags" : "Relationship"
+          }, {
+            "description" : "Planned: fetches PR state",
+            "destinationId" : "10",
+            "id" : "25",
+            "sourceId" : "7",
+            "tags" : "Relationship"
+          }, {
+            "description" : "Planned: exports telemetry",
+            "destinationId" : "12",
+            "id" : "31",
+            "sourceId" : "7",
+            "tags" : "Relationship",
+            "technology" : "OTLP over HTTP"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "Go"
+        }, {
+          "description" : "Planned. Polls REST every 15 minutes, sweeps open pull requests nightly, and backfills new installations.",
+          "documentation" : { },
+          "id" : "8",
+          "name" : "Reconciler",
+          "properties" : {
+            "structurizr.dsl.identifier" : "reconciler"
+          },
+          "relationships" : [ {
+            "description" : "Planned: keeps watermarks",
+            "destinationId" : "11",
+            "id" : "23",
+            "sourceId" : "8",
+            "tags" : "Relationship"
+          }, {
+            "description" : "Planned: schedules PRs",
+            "destinationId" : "7",
+            "id" : "24",
+            "sourceId" : "8",
+            "tags" : "Relationship"
+          }, {
+            "description" : "Planned: lists PRs",
+            "destinationId" : "10",
+            "id" : "26",
+            "sourceId" : "8",
+            "tags" : "Relationship"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "Go"
+        }, {
+          "description" : "One shared token bucket with four priorities.",
+          "documentation" : { },
+          "id" : "9",
+          "name" : "Request budget",
+          "properties" : {
+            "structurizr.dsl.identifier" : "limiter"
+          },
+          "tags" : "Element,Component",
+          "technology" : "internal/budget"
+        }, {
+          "description" : "Conditional requests, paging, token renewal, and secondary limit backoff.",
+          "documentation" : { },
+          "id" : "10",
+          "name" : "GitHub client",
+          "properties" : {
+            "structurizr.dsl.identifier" : "client"
+          },
+          "relationships" : [ {
+            "description" : "Waits for a budget slot",
+            "destinationId" : "9",
+            "id" : "27",
+            "sourceId" : "10",
+            "tags" : "Relationship"
+          }, {
+            "description" : "Planned: reads PRs",
+            "destinationId" : "2",
+            "id" : "28",
+            "sourceId" : "10",
+            "tags" : "Relationship",
+            "technology" : "HTTPS, REST"
+          } ],
+          "tags" : "Element,Component",
+          "technology" : "internal/ghclient"
+        } ],
+        "description" : "One static binary. Today it has the webhook receiver. Design: a worker and a reconciler.",
+        "documentation" : { },
+        "id" : "5",
+        "name" : "Service",
+        "properties" : {
+          "structurizr.dsl.identifier" : "service"
+        },
+        "relationships" : [ {
+          "description" : "Planned: queues deliveries",
+          "destinationId" : "11",
+          "id" : "21",
+          "linkedRelationshipId" : "20",
+          "sourceId" : "5"
+        }, {
+          "description" : "Planned: reads PRs",
+          "destinationId" : "2",
+          "id" : "29",
+          "linkedRelationshipId" : "28",
+          "sourceId" : "5",
+          "technology" : "HTTPS, REST"
+        }, {
+          "description" : "Planned: exports telemetry",
+          "destinationId" : "12",
+          "id" : "32",
+          "linkedRelationshipId" : "31",
+          "sourceId" : "5",
+          "technology" : "OTLP over HTTP"
+        } ],
+        "tags" : "Element,Container",
+        "technology" : "Go"
+      }, {
+        "description" : "Planned. Delivery queue, dedupe table, exported span IDs, metric milestones, watermarks, and entity tags.",
+        "documentation" : { },
+        "id" : "11",
+        "name" : "State store",
+        "properties" : {
+          "structurizr.dsl.identifier" : "store"
+        },
+        "tags" : "Element,Container,Database",
+        "technology" : "bbolt file on a mounted volume"
+      } ],
+      "description" : "Receives webhooks today. Design: reconciles pull request state from REST and exports telemetry.",
+      "documentation" : { },
+      "id" : "3",
+      "name" : "github-metrics",
+      "properties" : {
+        "structurizr.dsl.identifier" : "githubMetrics"
+      },
+      "relationships" : [ {
+        "description" : "Planned: reads PRs",
+        "destinationId" : "2",
+        "id" : "30",
+        "linkedRelationshipId" : "28",
+        "sourceId" : "3",
+        "technology" : "HTTPS, REST"
+      }, {
+        "description" : "Planned: exports telemetry",
+        "destinationId" : "12",
+        "id" : "33",
+        "linkedRelationshipId" : "31",
+        "sourceId" : "3",
+        "technology" : "OTLP over HTTP"
+      } ],
+      "tags" : "Element,Software System"
+    }, {
+      "description" : "Accepts OTLP over HTTP and fans out by signal.",
+      "documentation" : { },
+      "id" : "12",
+      "name" : "Host collector",
+      "properties" : {
+        "structurizr.dsl.identifier" : "collector"
+      },
+      "relationships" : [ {
+        "description" : "Traces",
+        "destinationId" : "13",
+        "id" : "34",
+        "sourceId" : "12",
+        "tags" : "Relationship"
+      }, {
+        "description" : "Metrics",
+        "destinationId" : "14",
+        "id" : "35",
+        "sourceId" : "12",
+        "tags" : "Relationship"
+      }, {
+        "description" : "Logs",
+        "destinationId" : "15",
+        "id" : "36",
+        "sourceId" : "12",
+        "tags" : "Relationship"
+      } ],
+      "tags" : "Element,Software System,External"
+    }, {
+      "description" : "Stores traces.",
+      "documentation" : { },
+      "id" : "13",
+      "name" : "Tempo",
+      "properties" : {
+        "structurizr.dsl.identifier" : "tempo"
+      },
+      "tags" : "Element,Software System,External"
+    }, {
+      "description" : "Stores metrics.",
+      "documentation" : { },
+      "id" : "14",
+      "name" : "Mimir",
+      "properties" : {
+        "structurizr.dsl.identifier" : "mimir"
+      },
+      "tags" : "Element,Software System,External"
+    }, {
+      "description" : "Stores logs.",
+      "documentation" : { },
+      "id" : "15",
+      "name" : "Loki",
+      "properties" : {
+        "structurizr.dsl.identifier" : "loki"
+      },
+      "tags" : "Element,Software System,External"
+    } ]
+  },
+  "name" : "github-metrics",
+  "properties" : {
+    "structurizr.inspection.error" : "21",
+    "structurizr.dsl" : "d29ya3NwYWNlICJnaXRodWItbWV0cmljcyIgIlR1cm5zIEdpdEh1YiBwdWxsIHJlcXVlc3QgYWN0aXZpdHkgaW50byBPcGVuVGVsZW1ldHJ5IHRyYWNlcywgbWV0cmljcywgYW5kIGxvZ3MuIFRvZGF5IG9ubHkgdGhlIHJlY2VpdmVyLCByZXF1ZXN0IGJ1ZGdldCwgYW5kIEdpdEh1YiBjbGllbnQgZXhpc3QuIFRoZSByZXN0IGlzIGRlc2lnbi4iIHsKCiAgICBtb2RlbCB7CiAgICAgICAgZW5naW5lZXIgPSBwZXJzb24gIkVuZ2luZWVyIiAiUmVhZHMgcHVsbCByZXF1ZXN0IHRpbWVsaW5lcywgdGltaW5nIG1ldHJpY3MsIGFuZCBzZXJ2aWNlIGxvZ3MgaW4gdGhlIG9ic2VydmFiaWxpdHkgYmFja2VuZHMuIgoKICAgICAgICBnaXRodWIgPSBzb2Z0d2FyZVN5c3RlbSAiR2l0SHViIiAiU2VuZHMgcHVsbCByZXF1ZXN0IHdlYmhvb2tzIGFuZCBzZXJ2ZXMgdGhlIFJFU1QgQVBJLiIgIkV4dGVybmFsIgoKICAgICAgICBnaXRodWJNZXRyaWNzID0gc29mdHdhcmVTeXN0ZW0gImdpdGh1Yi1tZXRyaWNzIiAiUmVjZWl2ZXMgd2ViaG9va3MgdG9kYXkuIERlc2lnbjogcmVjb25jaWxlcyBwdWxsIHJlcXVlc3Qgc3RhdGUgZnJvbSBSRVNUIGFuZCBleHBvcnRzIHRlbGVtZXRyeS4iIHsKICAgICAgICAgICAgdHVubmVsID0gY29udGFpbmVyICJUdW5uZWwgY29ubmVjdG9yIiAiUm91dGVzIG9ubHkgUE9TVCAvd2ViaG9vayBmcm9tIHRoZSBwdWJsaWMgaG9zdG5hbWUgdG8gdGhlIHNlcnZpY2UuIE1ha2VzIG91dGJvdW5kIGNvbm5lY3Rpb25zIG9ubHkuIiAiY2xvdWRmbGFyZWQiCiAgICAgICAgICAgIHNlcnZpY2UgPSBjb250YWluZXIgIlNlcnZpY2UiICJPbmUgc3RhdGljIGJpbmFyeS4gVG9kYXkgaXQgaGFzIHRoZSB3ZWJob29rIHJlY2VpdmVyLiBEZXNpZ246IGEgd29ya2VyIGFuZCBhIHJlY29uY2lsZXIuIiAiR28iIHsKICAgICAgICAgICAgICAgIHJlY2VpdmVyID0gY29tcG9uZW50ICJXZWJob29rIHJlY2VpdmVyIiAiVmVyaWZpZXMgdGhlIHNpZ25hdHVyZSB3aGlsZSBzdHJlYW1pbmcgdGhlIGJvZHksIGNoZWNrcyB0aGUgZGVsaXZlcnkgYW5kIGV2ZW50IGhlYWRlcnMsIHRoZW4gYW5zd2VycyAyMDIgb3IgNDAwLiIgIm5ldC9odHRwIgogICAgICAgICAgICAgICAgd29ya2VyID0gY29tcG9uZW50ICJXb3JrZXIiICJQbGFubmVkLiBUdXJucyB0aGUgY3VycmVudCBzdGF0ZSBvZiBhIHB1bGwgcmVxdWVzdCBpbnRvIHNwYW5zIGFuZCBtZXRyaWMgb2JzZXJ2YXRpb25zLiIgIkdvIgogICAgICAgICAgICAgICAgcmVjb25jaWxlciA9IGNvbXBvbmVudCAiUmVjb25jaWxlciIgIlBsYW5uZWQuIFBvbGxzIFJFU1QgZXZlcnkgMTUgbWludXRlcywgc3dlZXBzIG9wZW4gcHVsbCByZXF1ZXN0cyBuaWdodGx5LCBhbmQgYmFja2ZpbGxzIG5ldyBpbnN0YWxsYXRpb25zLiIgIkdvIgogICAgICAgICAgICAgICAgbGltaXRlciA9IGNvbXBvbmVudCAiUmVxdWVzdCBidWRnZXQiICJPbmUgc2hhcmVkIHRva2VuIGJ1Y2tldCB3aXRoIGZvdXIgcHJpb3JpdGllcy4iICJpbnRlcm5hbC9idWRnZXQiCiAgICAgICAgICAgICAgICBjbGllbnQgPSBjb21wb25lbnQgIkdpdEh1YiBjbGllbnQiICJDb25kaXRpb25hbCByZXF1ZXN0cywgcGFnaW5nLCB0b2tlbiByZW5ld2FsLCBhbmQgc2Vjb25kYXJ5IGxpbWl0IGJhY2tvZmYuIiAiaW50ZXJuYWwvZ2hjbGllbnQiCiAgICAgICAgICAgIH0KICAgICAgICAgICAgc3RvcmUgPSBjb250YWluZXIgIlN0YXRlIHN0b3JlIiAiUGxhbm5lZC4gRGVsaXZlcnkgcXVldWUsIGRlZHVwZSB0YWJsZSwgZXhwb3J0ZWQgc3BhbiBJRHMsIG1ldHJpYyBtaWxlc3RvbmVzLCB3YXRlcm1hcmtzLCBhbmQgZW50aXR5IHRhZ3MuIiAiYmJvbHQgZmlsZSBvbiBhIG1vdW50ZWQgdm9sdW1lIiAiRGF0YWJhc2UiCiAgICAgICAgfQoKICAgICAgICBjb2xsZWN0b3IgPSBzb2Z0d2FyZVN5c3RlbSAiSG9zdCBjb2xsZWN0b3IiICJBY2NlcHRzIE9UTFAgb3ZlciBIVFRQIGFuZCBmYW5zIG91dCBieSBzaWduYWwuIiAiRXh0ZXJuYWwiCiAgICAgICAgdGVtcG8gPSBzb2Z0d2FyZVN5c3RlbSAiVGVtcG8iICJTdG9yZXMgdHJhY2VzLiIgIkV4dGVybmFsIgogICAgICAgIG1pbWlyID0gc29mdHdhcmVTeXN0ZW0gIk1pbWlyIiAiU3RvcmVzIG1ldHJpY3MuIiAiRXh0ZXJuYWwiCiAgICAgICAgbG9raSA9IHNvZnR3YXJlU3lzdGVtICJMb2tpIiAiU3RvcmVzIGxvZ3MuIiAiRXh0ZXJuYWwiCgogICAgICAgIGdpdGh1YiAtPiB0dW5uZWwgIkRlbGl2ZXJzIHdlYmhvb2tzIiAiSFRUUFMiCiAgICAgICAgdHVubmVsIC0+IHJlY2VpdmVyICJGb3J3YXJkcyBQT1NUIC93ZWJob29rIiAiSFRUUCIKICAgICAgICByZWNlaXZlciAtPiBzdG9yZSAiUGxhbm5lZDogcXVldWVzIGRlbGl2ZXJpZXMiCiAgICAgICAgd29ya2VyIC0+IHN0b3JlICJQbGFubmVkOiByZWFkcyBxdWV1ZSwgcmVjb3JkcyBzcGFucyIKICAgICAgICByZWNvbmNpbGVyIC0+IHN0b3JlICJQbGFubmVkOiBrZWVwcyB3YXRlcm1hcmtzIgogICAgICAgIHJlY29uY2lsZXIgLT4gd29ya2VyICJQbGFubmVkOiBzY2hlZHVsZXMgUFJzIgogICAgICAgIHdvcmtlciAtPiBjbGllbnQgIlBsYW5uZWQ6IGZldGNoZXMgUFIgc3RhdGUiCiAgICAgICAgcmVjb25jaWxlciAtPiBjbGllbnQgIlBsYW5uZWQ6IGxpc3RzIFBScyIKICAgICAgICBjbGllbnQgLT4gbGltaXRlciAiV2FpdHMgZm9yIGEgYnVkZ2V0IHNsb3QiCiAgICAgICAgY2xpZW50IC0+IGdpdGh1YiAiUGxhbm5lZDogcmVhZHMgUFJzIiAiSFRUUFMsIFJFU1QiCiAgICAgICAgd29ya2VyIC0+IGNvbGxlY3RvciAiUGxhbm5lZDogZXhwb3J0cyB0ZWxlbWV0cnkiICJPVExQIG92ZXIgSFRUUCIKICAgICAgICBjb2xsZWN0b3IgLT4gdGVtcG8gIlRyYWNlcyIKICAgICAgICBjb2xsZWN0b3IgLT4gbWltaXIgIk1ldHJpY3MiCiAgICAgICAgY29sbGVjdG9yIC0+IGxva2kgIkxvZ3MiCiAgICAgICAgZW5naW5lZXIgLT4gdGVtcG8gIlJlYWRzIHRyYWNlcyIKICAgICAgICBlbmdpbmVlciAtPiBtaW1pciAiUmVhZHMgbWV0cmljcyIKICAgICAgICBlbmdpbmVlciAtPiBsb2tpICJSZWFkcyBsb2dzIgogICAgfQoKICAgIHZpZXdzIHsKICAgICAgICBzeXN0ZW1Db250ZXh0IGdpdGh1Yk1ldHJpY3MgIlN5c3RlbUNvbnRleHQiIHsKICAgICAgICAgICAgaW5jbHVkZSAqCiAgICAgICAgICAgIGF1dG9sYXlvdXQgbHIKICAgICAgICB9CgogICAgICAgIGNvbnRhaW5lciBnaXRodWJNZXRyaWNzICJDb250YWluZXJzIiB7CiAgICAgICAgICAgIGluY2x1ZGUgKgogICAgICAgICAgICBhdXRvbGF5b3V0IGxyCiAgICAgICAgfQoKICAgICAgICBjb21wb25lbnQgc2VydmljZSAiQ29tcG9uZW50cyIgewogICAgICAgICAgICBpbmNsdWRlICoKICAgICAgICAgICAgYXV0b2xheW91dCB0YiAyMDAgMTIwCiAgICAgICAgfQoKICAgICAgICBzdHlsZXMgewogICAgICAgICAgICBlbGVtZW50ICJQZXJzb24iIHsKICAgICAgICAgICAgICAgIHNoYXBlIFBlcnNvbgogICAgICAgICAgICB9CiAgICAgICAgICAgIGVsZW1lbnQgIkV4dGVybmFsIiB7CiAgICAgICAgICAgICAgICBiYWNrZ3JvdW5kICM5OTk5OTkKICAgICAgICAgICAgICAgIGNvbG9yICNmZmZmZmYKICAgICAgICAgICAgfQogICAgICAgICAgICBlbGVtZW50ICJEYXRhYmFzZSIgewogICAgICAgICAgICAgICAgc2hhcGUgQ3lsaW5kZXIKICAgICAgICAgICAgfQogICAgICAgIH0KICAgIH0KfQ==",
+    "structurizr.inspection.info" : "0",
+    "structurizr.inspection.ignore" : "0",
+    "structurizr.inspection.warning" : "0"
+  },
+  "views" : {
+    "componentViews" : [ {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 120,
+        "rankDirection" : "TopBottom",
+        "rankSeparation" : 200,
+        "vertices" : true
+      },
+      "containerId" : "5",
+      "elements" : [ {
+        "id" : "2",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "4",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "6",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "7",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "8",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "9",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "10",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "11",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "12",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "externalContainerBoundariesVisible" : false,
+      "key" : "Components",
+      "name" : "Component View: github-metrics - Service",
+      "order" : 3,
+      "relationships" : [ {
+        "id" : "16"
+      }, {
+        "id" : "18"
+      }, {
+        "id" : "20"
+      }, {
+        "id" : "22"
+      }, {
+        "id" : "23"
+      }, {
+        "id" : "24"
+      }, {
+        "id" : "25"
+      }, {
+        "id" : "26"
+      }, {
+        "id" : "27"
+      }, {
+        "id" : "28"
+      }, {
+        "id" : "31"
+      } ]
+    } ],
+    "configuration" : {
+      "styles" : {
+        "elements" : [ {
+          "shape" : "Cylinder",
+          "tag" : "Database"
+        }, {
+          "background" : "#999999",
+          "color" : "#ffffff",
+          "tag" : "External"
+        }, {
+          "shape" : "Person",
+          "tag" : "Person"
+        } ]
+      },
+      "terminology" : { }
+    },
+    "containerViews" : [ {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 50,
+        "rankDirection" : "LeftRight",
+        "rankSeparation" : 100,
+        "vertices" : true
+      },
+      "elements" : [ {
+        "id" : "2",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "4",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "5",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "11",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "12",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "externalSoftwareSystemBoundariesVisible" : false,
+      "key" : "Containers",
+      "name" : "Container View: github-metrics",
+      "order" : 2,
+      "relationships" : [ {
+        "id" : "16"
+      }, {
+        "id" : "19"
+      }, {
+        "id" : "21"
+      }, {
+        "id" : "29"
+      }, {
+        "id" : "32"
+      } ],
+      "softwareSystemId" : "3"
+    } ],
+    "systemContextViews" : [ {
+      "automaticLayout" : {
+        "edgeSeparation" : 50,
+        "nodeSeparation" : 50,
+        "rankDirection" : "LeftRight",
+        "rankSeparation" : 100,
+        "vertices" : true
+      },
+      "elements" : [ {
+        "id" : "2",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "3",
+        "x" : 0,
+        "y" : 0
+      }, {
+        "id" : "12",
+        "x" : 0,
+        "y" : 0
+      } ],
+      "enterpriseBoundaryVisible" : true,
+      "key" : "SystemContext",
+      "name" : "System Context View: github-metrics",
+      "order" : 1,
+      "relationships" : [ {
+        "id" : "17"
+      }, {
+        "id" : "30"
+      }, {
+        "id" : "33"
+      } ],
+      "softwareSystemId" : "3"
+    } ]
+  }
+}
