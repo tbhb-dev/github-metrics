@@ -101,6 +101,7 @@ nogo(
 # the tree is never linted.
 GO_TARGETS = [
     "//cmd/github-metrics:github-metrics_lib",
+    "//cmd/github-metrics:github-metrics_test",
     "//internal/budget",
     "//internal/budget:budget_test",
     "//internal/ghclient",

@@ -27,12 +27,17 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
+	"github.com/tbhb-dev/github-metrics/internal/recorder"
 	"github.com/tbhb-dev/github-metrics/internal/store"
+	"github.com/tbhb-dev/github-metrics/internal/telemetry"
 	"github.com/tbhb-dev/github-metrics/internal/worker"
 )
 
 const (
+	version         = "0.0.0-dev"
 	shutdownTimeout = 10 * time.Second
 	probeTimeout    = 3 * time.Second
 	pollInterval    = time.Second
@@ -99,10 +104,27 @@ func run(addr string, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	shutdownTelemetry, meter, err := telemetry.Setup(ctx, "github-metrics", version)
+	if err != nil {
+		return errors.Join(err, repo.Close())
+	}
+
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+
+	consumer, err := newRecorder(endpoint, meter)
+	if err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+
+		return errors.Join(err, shutdownTelemetry(shutdownCtx), repo.Close())
+	}
+
+	log.InfoContext(ctx, "recorder mode", "configured", endpoint != "")
+
 	workerErr := make(chan error, 1)
 
 	go func() {
-		workerErr <- worker.New(repo, noopRecorder{}, log).Run(ctx, pollInterval)
+		workerErr <- worker.New(repo, consumer, log).Run(ctx, pollInterval)
 
 		stop()
 	}()
@@ -124,7 +146,21 @@ func run(addr string, log *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	return errors.Join(err, srv.Shutdown(shutdownCtx), <-workerErr, repo.Close())
+	return errors.Join(err, srv.Shutdown(shutdownCtx), <-workerErr, shutdownTelemetry(shutdownCtx), repo.Close())
+}
+
+//nolint:ireturn // The worker accepts either recorder through its interface.
+func newRecorder(endpoint string, meter metric.Meter) (worker.Recorder, error) {
+	if endpoint == "" {
+		return noopRecorder{}, nil
+	}
+
+	consumer, err := recorder.New(meter)
+	if err != nil {
+		return nil, fmt.Errorf("create recorder: %w", err)
+	}
+
+	return consumer, nil
 }
 
 type noopRecorder struct{}
