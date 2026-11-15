@@ -24,7 +24,7 @@ import (
 
 const (
 	// maxAttempts bounds the sends of one Get, counting a send after a token
-	// renewal and each retry after a secondary rate limit wait.
+	// renewal and each retry after a rate limit wait, secondary or primary.
 	maxAttempts = 4
 	// maxBody caps a response body.
 	maxBody = 16 << 20
@@ -33,8 +33,12 @@ const (
 	// maxETags bounds the stored tags.
 	maxETags = 10000
 	// pastResetWait is the wait for a spent non-core response whose reset is
-	// already past, as when the local clock runs ahead of GitHub's.
+	// already past. It covers only a few seconds of clock skew or a reset
+	// truncated to the second, not larger skew.
 	pastResetWait = 3 * time.Second
+	// maxResetUnix bounds a plausible `x-ratelimit-reset`, the start of 2100.
+	// A larger value is invalid, since time.Unix would wrap it into the past.
+	maxResetUnix = 4102444800
 
 	// bodyProbe is how much of a 403 body is searched for a secondary limit.
 	bodyProbe = 4096
@@ -309,13 +313,13 @@ func (c *Client) send(ctx context.Context, full *url.URL, token string) (*reply,
 
 // observe passes the rate limit headers to the budget.
 func (c *Client) observe(header http.Header) {
-	remaining, err := strconv.Atoi(header.Get("X-Ratelimit-Remaining"))
+	remaining, err := strconv.Atoi(strings.TrimSpace(header.Get("X-Ratelimit-Remaining")))
 	if err != nil {
 		return
 	}
 
-	reset, err := strconv.ParseInt(header.Get("X-Ratelimit-Reset"), 10, 64)
-	if err != nil {
+	reset, ok := resetUnix(header)
+	if !ok {
 		return
 	}
 
@@ -423,20 +427,35 @@ func (c *Client) primaryBackoff(ctx context.Context, got *reply, last bool) erro
 	}
 }
 
-// hasReset is true when `x-ratelimit-reset` holds a positive integer, even
-// one that's past.
-func hasReset(header http.Header) bool {
-	reset, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-Ratelimit-Reset")), 10, 64)
+// resetUnix parses `x-ratelimit-reset` as Unix seconds. It refuses a value
+// that's absent, not a plain integer (a leading plus sign too, as in
+// the `retry-after` parse), not positive, or past maxResetUnix.
+func resetUnix(header http.Header) (int64, bool) {
+	value := strings.TrimSpace(header.Get("X-Ratelimit-Reset"))
 
-	return err == nil && reset > 0
+	reset, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || strings.HasPrefix(value, "+") || reset <= 0 || reset > maxResetUnix {
+		return 0, false
+	}
+
+	return reset, true
+}
+
+// hasReset is true when `x-ratelimit-reset` is valid, even if it's past.
+func hasReset(header http.Header) bool {
+	_, ok := resetUnix(header)
+
+	return ok
 }
 
 // untilReset returns the time to the `x-ratelimit-reset` of a response,
 // clamped to the budget's reset cap. It's zero when the header is absent,
-// invalid or past, which leaves the wait to the budget's doubling backoff.
+// invalid or past. A core response then waits on the budget's doubling
+// backoff. Another resource waits pastResetWait for a past reset and gives up
+// on an invalid one.
 func untilReset(header http.Header) time.Duration {
-	reset, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-Ratelimit-Reset")), 10, 64)
-	if err != nil {
+	reset, ok := resetUnix(header)
+	if !ok {
 		return 0
 	}
 
