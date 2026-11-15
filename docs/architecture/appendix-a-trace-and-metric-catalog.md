@@ -83,12 +83,12 @@ Duration histograms, all in seconds:
 | `github.pull_request.time_to_first_review` | PR `created_at` | `submitted_at` of the first review whose author isn't the PR author |
 | `github.pull_request.time_to_approval` | PR `created_at` | `submitted_at` of the first `APPROVED` review |
 | `github.pull_request.time_to_merge` | PR `created_at` | `merged_at` |
-| `github.pull_request.time_from_first_commit_to_merge` | Date of the PR's first commit | `merged_at` |
-| `github.pull_request.time_from_first_commit_to_open` | Date of the PR's first commit | PR `created_at` |
-| `github.pull_request.time_from_last_commit_to_merge` | Date of the PR's last commit | `merged_at` |
+| `github.pull_request.time_from_first_commit_to_merge` | Commit time of the PR's first commit | `merged_at` |
+| `github.pull_request.time_from_first_commit_to_open` | Commit time of the PR's first commit | PR `created_at` |
+| `github.pull_request.time_from_last_commit_to_merge` | Commit time of the PR's last commit | `merged_at` |
 | `github.pull_request.time_from_approval_to_merge` | `submitted_at` of the last `APPROVED` review before the merge | `merged_at` |
 
-Every commit time is the committer date, the one date used for the first-commit and last-commit histograms and for the cycle time start (the name of the REST field is unverified). A PR opened before its first push can produce a negative duration, and the worker skips that observation.
+Every commit time is the committer date, the one time used for the first-commit and last-commit histograms and for the cycle time start (the name of the REST field is unverified). A PR opened before its first push can produce a negative duration, and the worker skips that observation.
 
 Size histograms, recorded at merge:
 
@@ -120,9 +120,9 @@ The cycle time histogram runs from the start of the first agent run that contrib
 
 | Instrument | Start | End | Extra attributes |
 | --- | --- | --- | --- |
-| `github.pull_request.cycle_time` | The earliest of every `started_at` on an identity trailer line in the PR's commits or body, and the date of the PR's earliest commit | `merged_at`, or `closed_at` for a PR closed without a merge | `vcs.change.state`: `merged` or `closed`. `github.pull_request.start_source`: `started_at` or `commit`, whichever supplied the start |
+| `github.pull_request.cycle_time` | The earliest of every `started_at` on an identity trailer line in the PR's commits or body, and the commit time of the PR's earliest commit | `merged_at`, or `closed_at` for a PR closed without a merge | `vcs.change.state`: `merged` or `closed`. `github.pull_request.start_source`: `started_at` or `commit`, whichever supplied the start |
 
-The start is the earliest of all those times, so a non-agent commit that predates the first agent launch sets the start. Lines with `started_at` come from both Generated-by and Assisted-by trailers, in the commits, and in the PR body. No trailer has `started_at` today, so PRs record the earliest commit date and the source `commit`. Once a PR has an earlier `started_at`, the source switches. That field and its format come from the start-time design in `tbhb-dev/wiki-private#419` (the exact format is unverified), and the worker reads only that field and drops the rest of the trailer text. A closed PR is a separate end state from a merged one. Work before the first agent run or commit doesn't count. Decisions/2026-11-14-start-time-trailer-cycle-time.md in the operator's notes defines the start, the fallback, and the precedence.
+The start is the earliest of all those times, so a non-agent commit that predates the first agent launch sets the start. Lines with `started_at` come from both Generated-by and Assisted-by trailers, in the commits, and in the PR body. No trailer has `started_at` today, so PRs record the earliest commit time and the source `commit`. Once a PR has an earlier `started_at`, the source switches. The start-time trailer design defines that field in Coordinated Universal Time (UTC) with whole seconds, in the form `YYYY-MM-DDTHH:MM:SSZ`, and the worker reads only that field and drops the rest of the trailer text. A closed PR is a separate end state from a merged one. Work before the first agent run or commit doesn't count. Decisions/2026-11-14-start-time-trailer-cycle-time.md in the operator's notes defines the start, the fallback, and the precedence.
 
 Only the first end of a PR counts. If a reopened PR ends again, the stored `ended` milestone blocks a second observation.
 
@@ -132,7 +132,7 @@ The metric attributes are `vcs.repository.name`, and `github.author.type` with t
 
 ### Direct metrics, not derived from traces
 
-The service records durations itself because Tempo's metrics generator can't derive them from this service's spans. It drops spans that ended more than 30 seconds before ingestion (`MetricsIngestionSlack`, default 30 s, in `modules/generator/config.go` of Tempo 3.1.0), and the service backdates its spans to GitHub's timestamps. Whether the host's Tempo configuration overrides the default is unverified. Span metrics from Alloy are an optional extra and never the source of these series. D14 records the decision.
+The service records durations itself because Tempo's metrics generator can't derive them from this service's spans. It drops spans that ended more than 30 seconds before ingestion (`MetricsIngestionSlack`, default 30 s, in `modules/generator/config.go` of Tempo 3.1.0), and the service backdates its spans to GitHub's timestamps. The host runs Tempo 3.1.0 and its checked-in configuration doesn't override the default (`o11y/compose.yaml:105` and `o11y/config/tempo/config.yaml` in the ops repository). Span metrics from Alloy are an optional extra and never the source of these series. D14 records the decision.
 
 ### Cardinality budget
 
