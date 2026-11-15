@@ -8,7 +8,9 @@ This page moves details that pages 6, 7, and 8 only summarize out of the wiki de
 
 An App installation gets at least 5,000 requests an hour from GitHub, and 50 more per repository once it has more than 20, up to 12,500. Nobody has checked whether that counts every repository or only those past 20 (unverified). The budget here uses the 5,000 floor.
 
-List endpoints return at most 100 items a page. Each per-PR fetch of reviews, commits, and timeline averages 4 requests in the estimates, not 3, because about a third of the lists need a second page. A PR with more than 100 commits or timeline events costs more (unverified until the first run measures it). Most repositories need one PR list page per incremental run, since the walk stops at the watermark, and the estimate adds 4 pages for busy ones.
+List endpoints return at most 100 items a page. Each per-PR fetch of reviews, commits, and timeline averages 4 requests in the estimates, not 3, because about a third of the lists need a second page. A PR with more than 100 commits or timeline events costs more (unverified until the first run measures it).
+
+Most repositories need one PR list page per incremental run, since the walk stops at the watermark, and the estimate adds 4 pages for busy ones.
 
 | Work | Requests | Per hour, worst case with no `304` |
 | --- | --- | --- |
@@ -17,7 +19,7 @@ List endpoints return at most 100 items a page. Each per-PR fetch of reviews, co
 | Webhook reconciles, about 30 PRs an hour: the PR, then reviews, commits, and timeline | 5 each | 150 |
 | Total steady state | | 450, about 9% of 5,000 |
 
-The nightly sweep adds about 400 requests for 100 open PRs. Most return `304`, and GitHub doesn't count a conditional request that returns `304` against the primary limit when it includes an `Authorization` header (existing, per appendix C). The real cost is far lower. Whether `ETag` values change at each hourly token rotation is unverified, and the worst-case figures assume they do.
+The nightly sweep adds about 400 requests for 100 open PRs. Most return `304`, and GitHub doesn't count a conditional request that returns `304` against the primary limit when it includes an `Authorization` header (existing, per appendix C). The real cost is well below the worst case. Whether `ETag` values change at each hourly token rotation is unverified, and the worst-case figures assume they do.
 
 ### Shared bucket
 
