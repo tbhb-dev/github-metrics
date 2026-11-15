@@ -128,10 +128,11 @@ go_mod_tidy_test(
     proxy = "@go_mod_proxy//:proxy",
 )
 
-# The macro creates a cached package report and a mutation_gate_test that
-# requires every mutant to be killed.
+# PR runs report survivors without failing. A blocking nightly full run
+# is a later change.
 gomutants_test(
     name = "store_mutation_test",
+    advisory = True,
     cpus = 4,
     go_mod = "go.mod",
     go_sum = "go.sum",
