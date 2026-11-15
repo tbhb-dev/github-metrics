@@ -2,7 +2,7 @@
 
 ## Level 1: containers
 
-Expected diagram, not yet generated: `diagrams/structurizr-Containers.svg`, from the Bazel target.
+![Containers: the tunnel connector forwards webhooks to the service, which uses the state store, GitHub, and the host collector](diagrams/structurizr-Containers.svg)
 
 | Container | Responsibility |
 | --- | --- |
@@ -12,7 +12,7 @@ Expected diagram, not yet generated: `diagrams/structurizr-Containers.svg`, from
 
 ## Level 2: the service
 
-Expected diagram, not yet generated: `diagrams/structurizr-Components.svg`, from the Bazel target.
+![Components of the service: receiver, worker, reconciler, request budget, and GitHub client](diagrams/structurizr-Components.svg)
 
 | Component | Package | Status |
 | --- | --- | --- |

@@ -204,3 +204,4 @@ autolayout
 bbolt
 readyz
 structurizr
+tsvg

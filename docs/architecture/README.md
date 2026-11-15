@@ -26,7 +26,15 @@ The service is under construction. Each page says what exists on main and what t
 
 ## Diagrams
 
-`workspace.dsl` is the source. The operator plans a Bazel target to check it, then write `workspace.json` here and the images to `diagrams/`. That target hasn't merged, so none of these outputs exist yet. Once it does, nobody edits them by hand. The pages link these expected files:
+`workspace.dsl` is the source. The images in `diagrams/` come from it with the Structurizr command-line tool and PlantUML, using these commands in this directory:
+
+```sh
+structurizr export -workspace workspace.dsl -format plantuml -output ./out
+plantuml -tsvg ./out/structurizr-{SystemContext,Containers,Components}.puml
+mv ./out/*.svg diagrams/
+```
+
+The operator plans a Bazel target to check the workspace file and write the images. That target hasn't merged, and it replaces these hand-run exports. The pages link these files:
 
 - `diagrams/structurizr-SystemContext.svg`
 - `diagrams/structurizr-Containers.svg`

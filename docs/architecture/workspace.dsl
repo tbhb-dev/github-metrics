@@ -24,15 +24,15 @@ workspace "github-metrics" "Turns GitHub pull request activity into OpenTelemetr
 
         github -> tunnel "Delivers webhooks" "HTTPS"
         tunnel -> receiver "Forwards POST /webhook" "HTTP"
-        receiver -> store "Planned: appends verified deliveries to the queue. Today the receiver discards the body"
-        worker -> store "Planned: reads the queue, records spans and milestones"
-        reconciler -> store "Planned: reads and writes watermarks and entity tags"
-        reconciler -> worker "Planned: schedules pull requests for reconciliation"
-        worker -> client "Planned: fetches pull request state"
-        reconciler -> client "Planned: lists pull requests"
+        receiver -> store "Planned: queues deliveries"
+        worker -> store "Planned: reads queue, records spans"
+        reconciler -> store "Planned: keeps watermarks"
+        reconciler -> worker "Planned: schedules PRs"
+        worker -> client "Planned: fetches PR state"
+        reconciler -> client "Planned: lists PRs"
         client -> limiter "Waits for a budget slot"
-        client -> github "Planned: reads pull requests, reviews, commits, and timelines" "HTTPS, REST"
-        worker -> collector "Planned: exports traces, metrics, and logs" "OTLP over HTTP"
+        client -> github "Planned: reads PRs" "HTTPS, REST"
+        worker -> collector "Planned: exports telemetry" "OTLP over HTTP"
         collector -> tempo "Traces"
         collector -> mimir "Metrics"
         collector -> loki "Logs"
@@ -54,7 +54,7 @@ workspace "github-metrics" "Turns GitHub pull request activity into OpenTelemetr
 
         component service "Components" {
             include *
-            autolayout lr
+            autolayout tb 200 120
         }
 
         styles {
