@@ -11,7 +11,10 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/tbhb-dev/github-metrics/cmd/github-metrics",
     visibility = ["//:__pkg__"],
-    deps = ["//internal/receiver"],
+    deps = [
+        "//internal/receiver",
+        "//internal/store",
+    ],
 )
 
 go_binary(

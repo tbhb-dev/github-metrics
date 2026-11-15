@@ -27,7 +27,7 @@ func serve(t *testing.T, network, addr string) string {
 		t.Skipf("cannot listen on %s: %v", addr, err)
 	}
 
-	srv := receiver.NewServer(addr, receiver.Handler([]byte(testSecret), slog.New(slog.DiscardHandler)))
+	srv := receiver.NewServer(addr, receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler)))
 
 	go func() {
 		serveErr := srv.Serve(lis)

@@ -4,16 +4,19 @@
 package receiver_test
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
+	"github.com/tbhb-dev/github-metrics/internal/store"
 )
 
 const (
@@ -23,6 +26,7 @@ const (
 	testSecret     = "test-secret"
 	deliveryID     = "d-1"
 	pingEvent      = "ping"
+	openedBody     = `{"action":"opened"}`
 )
 
 func sign(secret, body string) string {
@@ -49,15 +53,42 @@ func tamper(signature string, pos int) string {
 	return "sha256=" + string(digits)
 }
 
+func openStore(t *testing.T) *store.Bolt {
+	t.Helper()
+
+	repo, err := store.Open(filepath.Join(t.TempDir(), "store.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = repo.Close() })
+
+	return repo
+}
+
 func do(t *testing.T, secret, method, path, body string, header map[string]string) int {
 	t.Helper()
 
-	handler := receiver.Handler([]byte(secret), slog.New(slog.DiscardHandler))
+	handler := receiver.Handler([]byte(secret), openStore(t), slog.New(slog.DiscardHandler))
 	req := httptest.NewRequestWithContext(t.Context(), method, path, strings.NewReader(body))
 
 	for name, value := range header {
 		req.Header.Set(name, value)
 	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	return rec.Code
+}
+
+func postDelivery(t *testing.T, handler http.Handler) int {
+	t.Helper()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", strings.NewReader(openedBody))
+	req.Header.Set(sigHeader, sign(testSecret, openedBody))
+	req.Header.Set(deliveryHeader, deliveryID)
+	req.Header.Set(eventHeader, "pull_request")
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -256,5 +287,86 @@ func TestRouting(t *testing.T) {
 				t.Errorf("status = %d, want %d", got, spec.want)
 			}
 		})
+	}
+}
+
+func TestNewDeliveryQueued(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	repo := openStore(t)
+	handler := receiver.Handler([]byte(testSecret), repo, slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	if got := postDelivery(t, handler); got != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", got)
+	}
+
+	entries, err := repo.Pending(10)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+
+	if len(entries) != 1 || entries[0].Delivery != deliveryID || string(entries[0].Body) != openedBody {
+		t.Fatalf("pending = %+v", entries)
+	}
+
+	if !strings.Contains(logs.String(), `"outcome":"enqueued"`) {
+		t.Errorf("log = %s, want outcome enqueued", logs.String())
+	}
+}
+
+func TestReplayDeliveryIsDuplicate(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	repo := openStore(t)
+	handler := receiver.Handler([]byte(testSecret), repo, slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	if got := postDelivery(t, handler); got != http.StatusAccepted {
+		t.Fatalf("first status = %d, want 202", got)
+	}
+
+	logs.Reset()
+
+	if got := postDelivery(t, handler); got != http.StatusAccepted {
+		t.Fatalf("replay status = %d, want 202", got)
+	}
+
+	entries, err := repo.Pending(10)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("pending len = %d, want 1", len(entries))
+	}
+
+	if !strings.Contains(logs.String(), `"outcome":"duplicate"`) {
+		t.Errorf("replay log = %s, want outcome duplicate", logs.String())
+	}
+}
+
+func TestStoreErrorAnswers500(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	repo := openStore(t)
+
+	err := repo.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	handler := receiver.Handler([]byte(testSecret), repo, slog.New(slog.NewJSONHandler(&logs, nil)))
+
+	if got := postDelivery(t, handler); got != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", got)
+	}
+
+	if !strings.Contains(logs.String(), `"level":"ERROR"`) {
+		t.Errorf("log = %s, want an ERROR line", logs.String())
 	}
 }

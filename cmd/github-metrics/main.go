@@ -5,6 +5,8 @@
 //
 // WEBHOOK_SECRET_FILE names a file that contains the App's webhook secret.
 //
+// STORE_FILE names the store file for the webhook queue and dedupe table.
+//
 // LISTEN_ADDR is the listen address and defaults to :8080. The health check
 // probes that address, or loopback when its host is a wildcard.
 //
@@ -26,6 +28,7 @@ import (
 	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
+	"github.com/tbhb-dev/github-metrics/internal/store"
 )
 
 const (
@@ -36,6 +39,7 @@ const (
 var (
 	errNoSecretFile = errors.New("WEBHOOK_SECRET_FILE is not set")
 	errEmptySecret  = errors.New("webhook secret file is empty")
+	errNoStoreFile  = errors.New("STORE_FILE is not set")
 )
 
 func main() {
@@ -77,7 +81,17 @@ func run(addr string, log *slog.Logger) error {
 		return errEmptySecret
 	}
 
-	srv := receiver.NewServer(addr, receiver.Handler(secret, log))
+	storeFile := os.Getenv("STORE_FILE")
+	if storeFile == "" {
+		return errNoStoreFile
+	}
+
+	repo, err := store.Open(storeFile)
+	if err != nil {
+		return fmt.Errorf("open store: %w", err)
+	}
+
+	srv := receiver.NewServer(addr, receiver.Handler(secret, repo, log))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -90,7 +104,7 @@ func run(addr string, log *slog.Logger) error {
 
 	select {
 	case err = <-serveErr:
-		return err
+		return errors.Join(err, repo.Close())
 	case <-ctx.Done():
 	}
 
@@ -99,7 +113,12 @@ func run(addr string, log *slog.Logger) error {
 
 	err = srv.Shutdown(shutdownCtx)
 	if err != nil {
-		return fmt.Errorf("shut down: %w", err)
+		return errors.Join(fmt.Errorf("shut down: %w", err), repo.Close())
+	}
+
+	err = repo.Close()
+	if err != nil {
+		return fmt.Errorf("close store: %w", err)
 	}
 
 	return nil
