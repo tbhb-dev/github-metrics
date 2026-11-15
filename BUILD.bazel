@@ -128,8 +128,7 @@ go_mod_tidy_test(
     proxy = "@go_mod_proxy//:proxy",
 )
 
-# PR runs report survivors without failing. A blocking nightly full run
-# is a later change.
+# PR runs report survivors without failing.
 gomutants_test(
     name = "store_mutation_test",
     advisory = True,
@@ -137,6 +136,28 @@ gomutants_test(
     go_mod = "go.mod",
     go_sum = "go.sum",
     proxy = "@go_mod_proxy//:proxy",
+    tests = ["//internal/store:store_test"],
+)
+
+# The scheduled Linux run reports survivors without failing and always checks
+# the full scope. Making it blocking waits until survivors are zero or the rule
+# can exclude them. The manual tag keeps this report out of wildcard PR runs.
+# Known survivors:
+# internal/store/store.go:235:16 BRANCH_IF: equivalent; NextSequence cannot fail
+# after earlier writes succeed.
+# internal/store/store.go:259:10 RETURN_ZERO: equivalent; entries is already a nil slice.
+# internal/store/store.go:236:10 RETURN_ERROR_NIL: not covered; needs dependency fault injection.
+# internal/store/store.go:236:37 ERRORF_WRAP: not covered; same fault injection path.
+gomutants_test(
+    name = "store_mutation_nightly_test",
+    advisory = True,
+    cpus = 4,
+    go_mod = "go.mod",
+    go_sum = "go.sum",
+    mutation_oses = ["linux"],
+    proxy = "@go_mod_proxy//:proxy",
+    require_scope = "full",
+    tags = ["manual"],
     tests = ["//internal/store:store_test"],
 )
 
