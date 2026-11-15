@@ -363,8 +363,10 @@ func TestReceiverServiceSettings(t *testing.T) {
 	for _, want := range []string{
 		"\n    user: \"65532:65532\"\n",
 		"\n    read_only: true\n",
+		"\n      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}\n",
 		"\n      STORE_FILE: /var/lib/github-metrics/store.db\n",
 		"\n    volumes:\n      - store:/var/lib/github-metrics\n",
+		"\n    networks:\n      - edge\n      - metrics\n",
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("the receiver service lacks %q", strings.TrimSpace(want))
@@ -373,6 +375,14 @@ func TestReceiverServiceSettings(t *testing.T) {
 
 	if !strings.Contains(composeText(t), "\nvolumes:\n  store: {}\n") {
 		t.Error("compose.yaml does not define the named store volume")
+	}
+
+	const network = "\n  metrics:\n" +
+		"    name: \"${METRICS_NETWORK:?set METRICS_NETWORK to the existing collector network}\"\n" +
+		"    external: true\n"
+
+	if !strings.Contains(composeText(t), network) {
+		t.Error("compose.yaml does not define the external metrics network with its required METRICS_NETWORK name")
 	}
 }
 
@@ -397,6 +407,7 @@ func TestTunnelServiceSettings(t *testing.T) {
 		"\n    secrets:\n      - tunnel_token\n",
 		"\n      - --token-file\n      - /run/secrets/tunnel_token\n",
 		"\n    depends_on:\n      receiver:\n        condition: service_healthy\n",
+		"\n    networks:\n      - edge\n    healthcheck:\n",
 	} {
 		if !strings.Contains(block, want) {
 			t.Errorf("the tunnel service lacks %q", strings.TrimSpace(want))
