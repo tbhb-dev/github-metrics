@@ -67,6 +67,9 @@ services:
 
   tunnel:
     image: cloudflare/cloudflared:2026.9.3@sha256:072c067d25ccbe61d46e18f0d0723255f2bb5304f7317caa95b27031520ff92c
+    # Use runc because cloudflared cannot resolve DNS under runsc (security debt
+    # GM-S-runc). Remove this override when fixed.
+    runtime: runc
     user: "65532:65532"
     read_only: true
     tmpfs:

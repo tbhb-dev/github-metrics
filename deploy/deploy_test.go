@@ -356,6 +356,10 @@ func TestReceiverServiceSettings(t *testing.T) {
 
 	block := serviceBlock(t, "receiver")
 
+	if strings.Contains(block, "\n    runtime:") {
+		t.Error("the receiver service overrides the default runtime")
+	}
+
 	for _, want := range []string{
 		"\n    user: \"65532:65532\"\n",
 		"\n    read_only: true\n",
@@ -385,6 +389,7 @@ func TestTunnelServiceSettings(t *testing.T) {
 	}
 
 	for _, want := range []string{
+		"\n    runtime: runc\n",
 		"\n    user: \"65532:65532\"\n",
 		"\n    read_only: true\n",
 		"\n    cap_drop: [ALL]\n",

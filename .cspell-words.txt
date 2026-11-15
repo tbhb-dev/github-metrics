@@ -146,6 +146,7 @@ rollup
 rumdl
 runfile
 runfiles
+runsc
 rylignore
 sandboxed
 sarif
