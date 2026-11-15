@@ -88,7 +88,7 @@ Duration histograms, all in seconds:
 | `github.pull_request.time_from_last_commit_to_merge` | Commit time of the PR's last commit | `merged_at` |
 | `github.pull_request.time_from_approval_to_merge` | `submitted_at` of the last `APPROVED` review before the merge | `merged_at` |
 
-Every commit time is the committer date, the one time used for the first-commit and last-commit histograms and for the cycle time start (the name of the REST field is unverified). A PR opened before its first push can produce a negative duration, and the worker skips that observation.
+Every commit time is `commit.committer.date`, the one time used for the first-commit and last-commit histograms and for the cycle time start. A PR opened before its first push can produce a negative duration, and the worker skips that observation.
 
 Size histograms, recorded at merge:
 
@@ -122,7 +122,7 @@ The cycle time histogram runs from the start of the first agent run that contrib
 | --- | --- | --- | --- |
 | `github.pull_request.cycle_time` | The earliest of every `started_at` on an identity trailer line in the PR's commits or body, and the commit time of the PR's earliest commit | `merged_at`, or `closed_at` for a PR closed without a merge | `vcs.change.state`: `merged` or `closed`. `github.pull_request.start_source`: `started_at` or `commit`, whichever supplied the start |
 
-The start is the earliest of all those times, so a non-agent commit that predates the first agent launch sets the start. Lines with `started_at` come from both Generated-by and Assisted-by trailers, in the commits, and in the PR body. No trailer has `started_at` today, so PRs record the earliest commit time and the source `commit`. Once a PR has an earlier `started_at`, the source switches. The start-time trailer design defines that field in Coordinated Universal Time (UTC) with whole seconds, in the form `YYYY-MM-DDTHH:MM:SSZ`, and the worker reads only that field and drops the rest of the trailer text. A closed PR is a separate end state from a merged one. Work before the first agent run or commit doesn't count. Decisions/2026-11-14-start-time-trailer-cycle-time.md in the operator's notes defines the start, the fallback, and the precedence.
+The start is the earliest of all those times, so a non-agent commit that predates the first agent launch sets the start. Lines with `started_at` come from both Generated-by and Assisted-by trailers, in the commits, and in the PR body. No trailer has `started_at` today, so PRs record the earliest commit time and the source `commit`. Once a PR has an earlier `started_at`, the source switches. The start-time trailer design defines that field in Coordinated Universal Time (UTC) with whole seconds, in the form `YYYY-MM-DDTHH:MM:SSZ`, and the worker reads only that field and drops the rest of the trailer text. A closed PR is a separate end state from a merged one. Work before the first agent run or commit doesn't count. The earliest commit time always counts, not only as a fallback.
 
 Only the first end of a PR counts. If a reopened PR ends again, the stored `ended` milestone blocks a second observation.
 
@@ -132,7 +132,7 @@ The metric attributes are `vcs.repository.name`, and `github.author.type` with t
 
 ### Direct metrics, not derived from traces
 
-The service records durations itself because Tempo's metrics generator can't derive them from this service's spans. It drops spans that ended more than 30 seconds before ingestion (`MetricsIngestionSlack`, default 30 s, in `modules/generator/config.go` of Tempo 3.1.0), and the service backdates its spans to GitHub's timestamps. The host runs Tempo 3.1.0 and its checked-in configuration doesn't override the default (`o11y/compose.yaml:105` and `o11y/config/tempo/config.yaml` in the ops repository). Span metrics from Alloy are an optional extra and never the source of these series. D14 records the decision.
+The service records durations itself because Tempo's metrics generator can't derive them from this service's spans. It drops spans that ended more than 30 seconds before ingestion (`MetricsIngestionSlack`, default 30 s, in `modules/generator/config.go` of Tempo 3.1.0), and the service backdates its spans to GitHub's timestamps. The deployment runs Tempo 3.1.0 and keeps the default slack of 30 s. Span metrics from Alloy are an optional extra and never the source of these series. D14 records the decision.
 
 ### Cardinality budget
 
@@ -168,11 +168,11 @@ The worker commits first and records second. A crash between steps 3 and 4 perma
 
 ### Dashboard and recording rules
 
-Today the 20-minute report's timing table comes from a prefill script that reads GitHub. The service's own series replace it, in two parts.
+Teams that report PR timing today read it from GitHub by script. The service's own series replace that, in two parts.
 
-Recording rules in Mimir compute, per repository over 24 hours, the median and p95 of `time_to_merge`, which is PR created to merged. They also compute the median and p95 of the first-commit and cycle time histograms, and the count of merged PRs. A goal flag per repository, `met` or `missed`, covers `tools` and `ops`. The goal is a median of 10 minutes and a p95 of 15 minutes from PR created to merged (Decisions/2026-11-14-tools-pr-turnaround-goal.md and Decisions/2026-11-14-ops-pr-turnaround-goal.md in the operator's notes). Cycle time is a separate figure and doesn't replace the goal. The prefill script already reports the goal measure (Decisions/2026-11-14-pr-stats-in-20-minute-reports.md), and the service's series let the dashboard show it without that script. With native histograms the flag reads the quantile directly, with the error that D15 states.
+Recording rules in Mimir compute, per repository over 24 hours, the median and p95 of `time_to_merge`, which is PR created to merged. They also compute the median and p95 of the first-commit and cycle time histograms, and the count of merged PRs. A goal flag per repository, `met` or `missed`, covers the repositories with a turnaround goal. The goal is a median of 10 minutes and a p95 of 15 minutes from PR created to merged. Cycle time is a separate figure and doesn't replace the goal. With native histograms the flag reads the quantile directly, with the error that D15 states.
 
-A Grafana dashboard then shows the rule outputs, the open PR count and oldest open age, the review counter by state, the cycle time by end state and start source, and the size histograms. It replaces the prefill timing table. Both live in the platform repository's observability configuration, not in this one, and step 8 of the plan covers them.
+A Grafana dashboard then shows the rule outputs, the open PR count and oldest open age, the review counter by state, the cycle time by end state and start source, and the size histograms. It replaces the scripted timing table. Both live in the platform repository's observability configuration, not in this one, and step 8 of the plan covers them.
 
 ### Metric loss on a crash
 
