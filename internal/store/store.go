@@ -240,12 +240,12 @@ func appendDelivery(txn *bolt.Tx, delivery string, body, hash, stamp []byte) err
 
 	err = queue.Put(key, body)
 	if err != nil {
-		return fmt.Errorf("append to queue: %w", err)
+		return fmt.Errorf("append body to queue: %w", err)
 	}
 
 	err = txn.Bucket([]byte(queueIDsBucket)).Put(key, []byte(delivery))
 	if err != nil {
-		return fmt.Errorf("append to queue: %w", err)
+		return fmt.Errorf("append delivery ID to queue: %w", err)
 	}
 
 	return nil

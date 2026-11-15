@@ -16,7 +16,14 @@ go_library(
 
 go_test(
     name = "store_test",
-    srcs = ["store_test.go"],
+    srcs = [
+        "export_test.go",
+        "store_test.go",
+    ],
+    embed = [":store"],
     visibility = ["//:__pkg__"],
-    deps = [":store"],
+    deps = [
+        "@io_etcd_go_bbolt//:bbolt",
+        "@io_etcd_go_bbolt//errors",
+    ],
 )
