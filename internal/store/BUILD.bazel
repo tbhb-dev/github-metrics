@@ -18,6 +18,7 @@ go_test(
     name = "store_test",
     srcs = [
         "export_test.go",
+        "fault_test.go",
         "store_test.go",
     ],
     embed = [":store"],

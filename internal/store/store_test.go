@@ -99,7 +99,12 @@ func TestReusedIDWithDifferentBody(t *testing.T) {
 	repo := open(t, filepath.Join(t.TempDir(), "store.db"))
 	enqueue(t, repo, "d1", "first")
 
-	_, err := repo.Enqueue("d1", []byte("second"))
+	outcome, err := repo.Enqueue("d1", []byte("second"))
+
+	if outcome != 0 {
+		t.Fatalf("outcome = %v, want 0", outcome)
+	}
+
 	if !errors.Is(err, store.ErrDeliveryReused) {
 		t.Fatalf("err = %v, want ErrDeliveryReused", err)
 	}
@@ -193,8 +198,8 @@ func TestFailedWriteLeavesStoreUnchanged(t *testing.T) {
 	huge := strings.Repeat("x", 40000)
 
 	_, err := repo.Enqueue(huge, []byte("lost"))
-	if err == nil {
-		t.Fatal("Enqueue with an oversized delivery ID succeeded")
+	if !errors.Is(err, boltErrors.ErrKeyTooLarge) {
+		t.Fatalf("Enqueue error = %v, want ErrKeyTooLarge", err)
 	}
 
 	entries := pending(t, repo)
@@ -213,7 +218,12 @@ func TestEmptyDeliveryID(t *testing.T) {
 
 	repo := open(t, filepath.Join(t.TempDir(), "store.db"))
 
-	_, err := repo.Enqueue("", []byte("body"))
+	outcome, err := repo.Enqueue("", []byte("body"))
+
+	if outcome != 0 {
+		t.Fatalf("outcome = %v, want 0", outcome)
+	}
+
 	if !errors.Is(err, store.ErrNoDelivery) {
 		t.Fatalf("err = %v, want ErrNoDelivery", err)
 	}
@@ -349,5 +359,63 @@ func TestNewFileMode(t *testing.T) {
 
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("mode = %o, want 600", got)
+	}
+}
+
+func TestPendingLimits(t *testing.T) {
+	t.Parallel()
+
+	repo := open(t, filepath.Join(t.TempDir(), "store.db"))
+	enqueue(t, repo, "d1", "first")
+	enqueue(t, repo, "d2", "second")
+
+	for _, limit := range []int{-1, 0, 1, 2, 3} {
+		entries, err := repo.Pending(limit)
+		want := max(0, min(limit, 2))
+
+		if err != nil || len(entries) != want {
+			t.Fatalf("Pending(%d) = %+v, %v, want %d entries", limit, entries, err, want)
+		}
+	}
+}
+
+func TestClosedStore(t *testing.T) {
+	t.Parallel()
+
+	repo := open(t, filepath.Join(t.TempDir(), "store.db"))
+
+	err := repo.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := repo.Enqueue("d1", []byte("body"))
+	if outcome != 0 || !errors.Is(err, boltErrors.ErrDatabaseNotOpen) {
+		t.Fatalf("Enqueue = %v, %v", outcome, err)
+	}
+
+	entries, err := repo.Pending(1)
+	if entries != nil || !errors.Is(err, boltErrors.ErrDatabaseNotOpen) {
+		t.Fatalf("Pending = %+v, %v", entries, err)
+	}
+
+	for _, limit := range []int{-1, 0} {
+		entries, err = repo.Pending(limit)
+		if entries != nil || err != nil {
+			t.Fatalf("Pending(%d) = %+v, %v", limit, entries, err)
+		}
+	}
+
+	err = repo.Remove(1)
+	if !errors.Is(err, boltErrors.ErrDatabaseNotOpen) {
+		t.Fatalf("Remove = %v", err)
+	}
+}
+
+func TestOutcomeValues(t *testing.T) {
+	t.Parallel()
+
+	if store.Enqueued != 1 || store.Duplicate != 2 {
+		t.Fatalf("outcomes = %d, %d, want 1, 2", store.Enqueued, store.Duplicate)
 	}
 }
