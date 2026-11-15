@@ -22,6 +22,7 @@ The service is under construction. Each page says what exists on main and what t
 | [appendix-b-app-permissions-and-events.md](appendix-b-app-permissions-and-events.md) | Appendix B: permissions, manifest keys, and events |
 | [appendix-c-github-limit-evidence.md](appendix-c-github-limit-evidence.md) | Appendix C: GitHub limit evidence |
 | [appendix-d-alternatives-considered.md](appendix-d-alternatives-considered.md) | Appendix D: alternatives considered and rejected |
+| [appendix-e-budget-dedupe-and-retention.md](appendix-e-budget-dedupe-and-retention.md) | Appendix E: budget, dedupe, and retention |
 
 ## Diagrams
 
