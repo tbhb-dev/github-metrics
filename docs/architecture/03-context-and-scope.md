@@ -24,4 +24,4 @@ Expected diagram, not yet generated: `diagrams/structurizr-SystemContext.svg`, f
 
 In scope: PR, review, review request, commit, reopen, merge, and close activity for every repository the App sees. Out of scope for the first release: checks, issue comments, pushes, review threads, and write access.
 
-The boundary with the organization collector is pending its owner and unverified. These pages leave it out, and the wiki design lists it as D13.
+The boundary with the organization collector is pending its owner and unverified. [D13](decisions/0013-the-boundary-with-the-organization-collector-pen.md) records it.

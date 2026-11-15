@@ -2,7 +2,7 @@
 
 This directory follows the arc42 template. Each numbered page is one arc42 section. The diagrams come from one Structurizr file named `workspace.dsl`.
 
-The service is under construction. Each page says what exists on main and what the design still plans. These pages summarize the design in the tbhb-dev wiki, under `drafts/github-metrics`.
+The service is under construction. Each page says what exists on main and what the design still plans. Commit `8e06fb1` of the `tbhb-dev/wiki` repository has the original design, in the `drafts/github-metrics` folder. These pages replace it.
 
 | Page | arc42 section |
 | --- | --- |

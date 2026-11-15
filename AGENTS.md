@@ -2,7 +2,7 @@
 
 ## What this is
 
-`github-metrics` is a planned Go service that turns GitHub pull request activity into OpenTelemetry traces and metrics. The design is in the public `tbhb-dev/wiki` repository, in the `drafts/github-metrics` folder. The Go module path is `github.com/tbhb-dev/github-metrics`.
+`github-metrics` is a planned Go service that turns GitHub pull request activity into OpenTelemetry traces and metrics. The original design is the `drafts/github-metrics` folder in the public `tbhb-dev/wiki` repository at commit `8e06fb1`. The Go module path is `github.com/tbhb-dev/github-metrics`.
 
 This repository is public. Never write a private repository name, a host name, an internal path, private network details, a public IP address, or a secret in it.
 
