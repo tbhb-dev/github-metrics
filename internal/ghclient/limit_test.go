@@ -195,7 +195,6 @@ func TestSpentCoreResetIsCappedAtOneHour(t *testing.T) {
 		{func(now time.Time) int64 { return now.Add(time.Hour).Unix() }, 59 * time.Minute},
 		{func(now time.Time) int64 { return now.Add(48 * time.Hour).Unix() }, 59 * time.Minute},
 		{func(time.Time) int64 { return year2099 }, 59 * time.Minute},
-		{func(time.Time) int64 { return math.MinInt64 }, 0},
 	} {
 		synctestRun(t, func(ctx context.Context) {
 			var calls atomic.Int32
@@ -232,26 +231,38 @@ func TestImplausibleResetIsInvalid(t *testing.T) {
 	}
 }
 
-// TestResetBoundsAreValid covers the first value each bound accepts.
+// TestResetBoundsAreValid covers the first value each bound accepts. A reset
+// of 60 is long past, so it waits pastResetWait. A reset of 4102444800 is far
+// ahead, so it waits the one-hour cap, not pastResetWait.
 func TestResetBoundsAreValid(t *testing.T) {
 	t.Parallel()
 
-	for _, reset := range []string{"60", "4102444800"} {
+	for _, test := range []struct {
+		reset           string
+		atLeast, atMost time.Duration
+	}{
+		{"60", 2 * time.Second, 10 * time.Second},
+		{"4102444800", 59 * time.Minute, time.Hour + time.Minute},
+	} {
 		synctestRun(t, func(ctx context.Context) {
 			var calls atomic.Int32
 
 			header := spentHeader("search", 0)
-			header.Set("X-Ratelimit-Reset", reset)
+			header.Set("X-Ratelimit-Reset", test.reset)
 			client := fakeClient(t, limitedOnce(http.StatusForbidden, header, &calls))
 
-			_, err := getWaited(ctx, t, client)
-			if err != nil || calls.Load() != 2 {
-				t.Fatalf("reset %q: err = %v, calls = %d", reset, err, calls.Load())
+			waited, err := getWaited(ctx, t, client)
+			if err != nil || calls.Load() != 2 || waited < test.atLeast || waited > test.atMost {
+				t.Fatalf("reset %q: err = %v, calls = %d, waited %v", test.reset, err, calls.Load(), waited)
 			}
 		})
 	}
 }
 
+// TestSpentCoreImplausibleResetBacksOffBriefly proves that a spent core
+// response with an unusable reset still pauses the shared limiter on its
+// doubling backoff, for at least a minute. The request retries and succeeds. It
+// neither gives up nor waits the one-hour cap.
 func TestSpentCoreImplausibleResetBacksOffBriefly(t *testing.T) {
 	t.Parallel()
 
