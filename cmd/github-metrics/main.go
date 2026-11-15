@@ -42,6 +42,7 @@ var (
 	errNoSecretFile = errors.New("WEBHOOK_SECRET_FILE is not set")
 	errEmptySecret  = errors.New("webhook secret file is empty")
 	errNoStoreFile  = errors.New("STORE_FILE is not set")
+	errNoRecorder   = errors.New("no recorder is configured")
 )
 
 func main() {
@@ -128,7 +129,7 @@ func run(addr string, log *slog.Logger) error {
 
 type noopRecorder struct{}
 
-func (noopRecorder) RecordPullRequest(_, _ string) error { return nil }
+func (noopRecorder) RecordPullRequest(_, _ string) error { return errNoRecorder }
 
 // probe asks the local health endpoint and returns the exit code.
 func probe(addr string) int {

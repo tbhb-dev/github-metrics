@@ -25,6 +25,7 @@ const (
 	removeFirst              = "remove 1"
 	pullRequestEvent         = "pull_request"
 	openedBody               = `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"opened"}`
+	badBodyReason            = "bad pull request body"
 )
 
 type queueStub struct {
@@ -88,14 +89,24 @@ func TestPass(t *testing.T) {
 	for _, test := range []struct {
 		name, event, body, log string
 		want                   []string
+		queued                 int
 	}{
 		{
 			"record before remove", pullRequestEvent, openedBody, "",
 			[]string{"record tbhb-dev/github-metrics opened", removeFirst},
+			0,
 		},
-		{"bad body removed", pullRequestEvent, `{"action":`, "bad pull request body", []string{removeFirst}},
-		{"empty fields removed", pullRequestEvent, `{}`, "bad pull request body", []string{removeFirst}},
-		{"other event removed", "ping", openedBody, "discarded event", []string{removeFirst}},
+		{"bad body kept", pullRequestEvent, `{"action":`, badBodyReason, nil, 1},
+		{"empty fields kept", pullRequestEvent, `{}`, badBodyReason, nil, 1},
+		{
+			"empty repository kept", pullRequestEvent, `{"repository":{"full_name":""},"action":"opened"}`,
+			badBodyReason, nil, 1,
+		},
+		{
+			"empty action kept", pullRequestEvent, `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":""}`,
+			badBodyReason, nil, 1,
+		},
+		{"other event kept", "ping\r\n", openedBody, "event=ping", nil, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -125,6 +136,15 @@ func TestPass(t *testing.T) {
 			err := worker.New(&queue, recorder, slog.New(slog.NewTextHandler(&logs, nil))).Pass(t.Context())
 			if err != nil || !reflect.DeepEqual(calls, test.want) || !strings.Contains(logs.String(), test.log) {
 				t.Fatalf("Pass: %v, calls = %v, logs = %q", err, calls, logs.String())
+			}
+
+			if len(entries) != test.queued {
+				t.Fatalf("queued = %d, want %d", len(entries), test.queued)
+			}
+
+			if test.queued != 0 &&
+				(strings.Count(logs.String(), "level=WARN") != 1 || strings.Contains(logs.String(), test.body)) {
+				t.Fatalf("expected one warning without the body, logs = %q", logs.String())
 			}
 		})
 	}
