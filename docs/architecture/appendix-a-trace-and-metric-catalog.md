@@ -88,7 +88,7 @@ Duration histograms, all in seconds:
 | `github.pull_request.time_from_last_commit_to_merge` | Date of the PR's last commit | `merged_at` |
 | `github.pull_request.time_from_approval_to_merge` | `submitted_at` of the last `APPROVED` review before the merge | `merged_at` |
 
-The commit dates are the committer dates that the REST commit list returns (unverified: which date the service reads is a design choice nobody has tested). A PR opened before its first push can produce a negative duration, and the worker skips that observation.
+Every commit time is the committer date, the one date used for the first-commit and last-commit histograms and for the cycle time start (the name of the REST field is unverified). A PR opened before its first push can produce a negative duration, and the worker skips that observation.
 
 Size histograms, recorded at merge:
 
@@ -114,7 +114,7 @@ Gauges, read from the store at each collection:
 | `github.pull_request.open` | `{pull_request}` | The number of open PRs |
 | `github.pull_request.oldest_open_age` | `s` | The age of the oldest open PR, from its `created_at` |
 
-The store gains an open-PR table with the node ID, repository, author type, and `created_at` of each open PR. The worker adds a row when a PR opens or reopens and removes it at merge or close, and the reconciler repairs rows that a missed webhook left wrong. A repository with no open PR reports 0 for the count and omits the age. When the service is down, both series go stale and the dashboard goes empty. Gauge values are state, so they can't double count, and a lost store refills from the backfill.
+An open-PR table joins the store, with the node ID, repository, author type, and `created_at` of each open PR. The worker adds a row when a PR opens or reopens and removes it at merge or close, and the reconciler repairs rows that a missed webhook left wrong. A repository with no open PR reports 0 for the count and omits the age. When the service is down, both series go stale and the dashboard goes empty. Gauge values are state, so they can't double count, and a lost store refills from the backfill.
 
 The cycle time histogram runs from the start of the first agent run that contributed to the PR until the PR ends:
 
@@ -122,11 +122,11 @@ The cycle time histogram runs from the start of the first agent run that contrib
 | --- | --- | --- | --- |
 | `github.pull_request.cycle_time` | The earliest of every `started_at` on an identity trailer line in the PR's commits or body, and the date of the PR's earliest commit | `merged_at`, or `closed_at` for a PR closed without a merge | `vcs.change.state`: `merged` or `closed`. `github.pull_request.start_source`: `started_at` or `commit`, whichever supplied the start |
 
-The start is the earliest of all those times, so a non-agent commit that predates the first agent launch sets the start. Without any `started_at` in its trailers, a PR starts at its earliest commit and records `commit` as the source. Until the tools that write the trailers add `started_at`, every PR records `commit`. The field and its format come from the start-time design in `tbhb-dev/wiki-private#419`, and the worker reads only that field and drops the rest of the trailer text (the exact format is unverified). Work before the first agent run or commit doesn't count.
+The start is the earliest of all those times, so a non-agent commit that predates the first agent launch sets the start. Lines with `started_at` come from both Generated-by and Assisted-by trailers, in the commits, and in the PR body. No trailer has `started_at` today, so PRs record the earliest commit date and the source `commit`. Once a PR has an earlier `started_at`, the source switches. That field and its format come from the start-time design in `tbhb-dev/wiki-private#419` (the exact format is unverified), and the worker reads only that field and drops the rest of the trailer text. A closed PR is a separate end state from a merged one. Work before the first agent run or commit doesn't count. Decisions/2026-11-14-start-time-trailer-cycle-time.md in the operator's notes defines the start, the fallback, and the precedence.
 
 Only the first end of a PR counts. If a reopened PR ends again, the stored `ended` milestone blocks a second observation.
 
-Every histogram is an exponential (native) histogram, with the SDK's default limit of 160 buckets. Over a range of 1 second to 30 days, 160 buckets give a scale of 2, which means each bucket spans a ratio of about 1.19 and a quantile estimate is off by about 9% at most. The 600 s and 900 s goal thresholds sit inside a bucket, not on an edge, so a goal check has the same error. D15 records the choice, the fallback, and the backend check. Each attribute set exports one native histogram series, with the count and sum inside it, if Mimir ingests native histograms (unverified).
+Every histogram is an exponential (native) histogram, with the SDK's default limit of 160 buckets. Over a range of 1 second to 30 days, 160 buckets give a scale of 2, which means each bucket spans a ratio of about 1.19 and a quantile estimate is off by about 9% at most. Goal thresholds of 600 s and 900 s sit inside a bucket, not on an edge, so a goal check has the same error. D15 records the choice, the fallback, and the backend check. Each attribute set exports one native histogram series, with the count and sum inside it, if Mimir ingests native histograms (unverified).
 
 The metric attributes are `vcs.repository.name`, and `github.author.type` with the values `user` or `bot`. The review counter adds `github.review.state`, and the cycle time histogram adds `vcs.change.state` and `github.pull_request.start_source`.
 
@@ -170,7 +170,7 @@ The worker commits first and records second. A crash between steps 3 and 4 perma
 
 Today the 20-minute report's timing table comes from a prefill script that reads GitHub. The service's own series replace it, in two parts.
 
-Recording rules in Mimir compute, per repository over 24 hours, the median and p95 of first commit to merge, first commit to open, and last commit to merge, plus the count of merged PRs. They also compute a goal flag per repository, `met` or `missed`, for the two repositories with a stated goal. The goal is a median of 10 minutes and a p95 of 15 minutes from first commit to merge, for `tools` and `ops` (the figures are from the operator's direction, and no code or report script records them yet). With native histograms the flag reads the quantile directly, with the error that D15 states.
+Recording rules in Mimir compute, per repository over 24 hours, the median and p95 of `time_to_merge`, which is PR created to merged. They also compute the median and p95 of the first-commit and cycle time histograms, and the count of merged PRs. A goal flag per repository, `met` or `missed`, covers `tools` and `ops`. The goal is a median of 10 minutes and a p95 of 15 minutes from PR created to merged (Decisions/2026-11-14-tools-pr-turnaround-goal.md and Decisions/2026-11-14-ops-pr-turnaround-goal.md in the operator's notes). Cycle time is a separate figure and doesn't replace the goal. The prefill script already reports the goal measure (Decisions/2026-11-14-pr-stats-in-20-minute-reports.md), and the service's series let the dashboard show it without that script. With native histograms the flag reads the quantile directly, with the error that D15 states.
 
 A Grafana dashboard then shows the rule outputs, the open PR count and oldest open age, the review counter by state, the cycle time by end state and start source, and the size histograms. It replaces the prefill timing table. Both live in the platform repository's observability configuration, not in this one, and step 8 of the plan covers them.
 
