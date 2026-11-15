@@ -11,6 +11,11 @@
 # The service publishes no port. Whatever carries webhook deliveries to it
 # joins the `edge` network and reaches it at receiver:8080.
 #
+# OTEL_EXPORTER_OTLP_ENDPOINT defaults to empty. Setting it drains the stored
+# queue, so the host owner must export the stored backlog first.
+# METRICS_NETWORK is required and names an existing network on the host.
+# Compose reads both from the environment or a .env file beside compose.yaml.
+#
 # Both secrets are files, never environment variables: `secrets/webhook_secret`
 # for the receiver and `secrets/tunnel_token` for the tunnel connector. Compose
 # bind-mounts each file as it is, so the host file itself must be readable by
@@ -45,6 +50,7 @@ services:
     restart: unless-stopped
     environment:
       LISTEN_ADDR: ":8080"
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       STORE_FILE: /var/lib/github-metrics/store.db
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
     volumes:
@@ -53,6 +59,7 @@ services:
       - webhook_secret
     networks:
       - edge
+      - metrics
     healthcheck:
       test: ["CMD", "/github-metrics", "-healthcheck"]
       interval: 30s
@@ -116,6 +123,9 @@ secrets:
 
 networks:
   edge: {}
+  metrics:
+    name: "${METRICS_NETWORK:?set METRICS_NETWORK to the existing collector network}"
+    external: true
 
 volumes:
   store: {}
