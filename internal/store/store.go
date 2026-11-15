@@ -4,6 +4,11 @@
 // Package store keeps the service's durable state in one `bbolt` file. This
 // first part has the webhook queue, the delivery dedupe table, and the
 // store's creation time.
+//
+// Later slices add the dedupe bound (entries last 7 days, at most 200,000,
+// oldest evicted first), the dead-letter bucket, and the span ID, milestone,
+// watermark, and entity tag records. Until the bound is added, the dedupe table
+// grows without limit.
 package store
 
 import (
