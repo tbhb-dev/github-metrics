@@ -28,7 +28,10 @@ const (
 func rawDB(t *testing.T, path string) *bolt.DB {
 	t.Helper()
 
-	database, err := bolt.Open(path, 0o600, nil)
+	opts := *bolt.DefaultOptions
+	opts.Timeout = 3 * time.Second
+
+	database, err := bolt.Open(path, 0o600, &opts)
 	if err != nil {
 		t.Fatal(err)
 	}
