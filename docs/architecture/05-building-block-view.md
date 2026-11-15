@@ -8,7 +8,7 @@
 | --- | --- |
 | Tunnel connector | Public entry for `POST /webhook`. Outbound connections only |
 | Service | The Go binary. Today it has the receiver, and the design adds the worker and the reconciler |
-| State store | Planned, with no store in the code yet. One `bbolt` file would hold the delivery queue, the dedupe table, watermarks, entity tags, and the state for exported span IDs and metric milestones |
+| State store | Planned, with no store in the code yet. One `bbolt` file would hold the delivery queue, the dedupe table, watermarks, entity tags, and the state for exported span IDs and metric milestones, and a table of open PRs for the gauges |
 
 ## Level 2: the service
 

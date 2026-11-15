@@ -20,7 +20,7 @@ Only a request with a valid signature reads or writes state. Tokens come from th
 
 ## Telemetry content
 
-Spans hold repository and branch names, PR numbers, logins, team slugs, states, and times. Metrics record only the repository name and the author type. Titles, bodies, comment text, and diffs never appear.
+Spans hold repository and branch names, PR numbers, logins, team slugs, states, and times. Metrics record only the repository name and the author type, the review counter adds the review state, and the cycle time histogram adds the end state and the start source. Titles, bodies, comment text, and diffs never appear.
 
 ## Logging
 
