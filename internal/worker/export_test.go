@@ -3,7 +3,5 @@
 
 package worker
 
-// Parse reads the pull request fields for table tests.
-func Parse(body []byte) (string, string, error) {
-	return parse(body)
-}
+// Parse reads a pull request body for table tests.
+func Parse(body []byte) (string, string, error) { return parse(body) }

@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,15 +16,12 @@ import (
 	"github.com/tbhb-dev/github-metrics/internal/worker"
 )
 
-const maxQueueReads = 10
-
-const removeFirst = "remove 1"
-
-const batchSize = 100
-
-const pullRequestEvent = "pull_request"
-
-const openedBody = `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"opened"}`
+const (
+	maxQueueReads, batchSize = 10, 100
+	removeFirst              = "remove 1"
+	pullRequestEvent         = "pull_request"
+	openedBody               = `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"opened"}`
+)
 
 type queueStub struct {
 	t       *testing.T
@@ -46,9 +44,9 @@ func (q *queueStub) Pending(limit int) ([]store.Entry, error) {
 
 func (q *queueStub) Remove(seq uint64) error { return q.remove(seq) }
 
-type recorderFunc func(string, string)
+type recorderFunc func(string, string) error
 
-func (f recorderFunc) RecordPullRequest(repository, action string) { f(repository, action) }
+func (f recorderFunc) RecordPullRequest(repo, action string) error { return f(repo, action) }
 
 func TestParse(t *testing.T) {
 	t.Parallel()
@@ -111,8 +109,10 @@ func TestPass(t *testing.T) {
 					return nil
 				},
 			}
-			recorder := recorderFunc(func(repository, action string) {
+			recorder := recorderFunc(func(repository, action string) error {
 				calls = append(calls, "record "+repository+" "+action)
+
+				return nil
 			})
 
 			err := worker.New(&queue, recorder, slog.New(slog.NewTextHandler(&logs, nil))).Pass(t.Context())
@@ -130,14 +130,10 @@ func TestPassDrainsBatches(t *testing.T) {
 
 	var removed, recorded uint64
 
-	var reads int
-
 	queue := queueStub{
 		t:     t,
 		reads: 0,
 		pending: func(limit int) ([]store.Entry, error) {
-			reads++
-
 			if limit != batchSize {
 				t.Fatalf("limit = %d, want %d", limit, batchSize)
 			}
@@ -162,10 +158,67 @@ func TestPassDrainsBatches(t *testing.T) {
 			return nil
 		},
 	}
-	consumer := worker.New(&queue, recorderFunc(func(_, _ string) { recorded++ }), slog.New(slog.DiscardHandler))
+	consumer := worker.New(&queue, recorderFunc(func(_, _ string) error {
+		recorded++
+
+		return nil
+	}), slog.New(slog.DiscardHandler))
 
 	err := consumer.Pass(t.Context())
-	if err != nil || recorded != total || removed != total || reads != 3 {
-		t.Fatalf("Pass: %v, recorded = %d, removed = %d, reads = %d", err, recorded, removed, reads)
+	if err != nil || recorded != total || removed != total || queue.reads != 3 {
+		t.Fatalf("Pass: %v, recorded = %d, removed = %d, reads = %d", err, recorded, removed, queue.reads)
+	}
+}
+
+func TestPassRecorderRetry(t *testing.T) {
+	t.Parallel()
+
+	for _, passes := range []int{1, 2} {
+		t.Run(fmt.Sprintf("passes %d", passes), func(t *testing.T) {
+			t.Parallel()
+
+			testRecorderRetry(t, passes)
+		})
+	}
+}
+
+func testRecorderRetry(t *testing.T, passes int) {
+	t.Helper()
+
+	queue, err := store.Open(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = queue.Close() })
+
+	for _, body := range []string{openedBody, openedBody + " "} {
+		_, err = queue.Enqueue(body, pullRequestEvent, []byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var records int
+
+	recordErr := store.ErrCorrupt
+	consumer := worker.New(queue, recorderFunc(func(_, _ string) error {
+		records++
+
+		return recordErr
+	}), slog.New(slog.DiscardHandler))
+
+	for range passes {
+		err = consumer.Pass(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		recordErr = nil
+	}
+
+	entries, err := queue.Pending(batchSize)
+	if err != nil || len(entries) != 2*(2-passes) || records != 2*passes-1 {
+		t.Fatalf("pending: %v, entries = %v, records = %d", err, entries, records)
 	}
 }

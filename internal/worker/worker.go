@@ -19,7 +19,7 @@ const batchSize = 100
 
 // Recorder records a pull request event, without a telemetry dependency.
 type Recorder interface {
-	RecordPullRequest(repository, action string)
+	RecordPullRequest(repository, action string) error
 }
 
 // Queue is the part of the store that a worker consumes.
@@ -72,13 +72,10 @@ func (w *Worker) Pass(ctx context.Context) error {
 		}
 
 		for _, entry := range entries {
-			select {
-			case <-ctx.Done():
+			done := ctx.Err() != nil || !w.record(ctx, entry)
+			if done {
 				return nil
-			default:
 			}
-
-			w.record(ctx, entry)
 
 			err = w.queue.Remove(entry.Seq)
 			if err != nil {
@@ -90,21 +87,26 @@ func (w *Worker) Pass(ctx context.Context) error {
 	return nil
 }
 
-func (w *Worker) record(ctx context.Context, entry store.Entry) {
+func (w *Worker) record(ctx context.Context, entry store.Entry) bool {
 	if entry.Event != "pull_request" {
 		w.log.InfoContext(ctx, "discarded event", "event", oneLine(entry.Event))
 
-		return
+		return true
 	}
 
 	repository, action, err := parse(entry.Body)
 	if err != nil {
 		w.log.WarnContext(ctx, "discarded event", "reason", "bad pull request body")
 
-		return
+		return true
 	}
 
-	w.recorder.RecordPullRequest(repository, action)
+	err = w.recorder.RecordPullRequest(repository, action)
+	if err != nil {
+		w.log.WarnContext(ctx, "recording failed", "event", oneLine(entry.Event))
+	}
+
+	return err == nil
 }
 
 func parse(body []byte) (string, string, error) {
@@ -123,8 +125,4 @@ func parse(body []byte) (string, string, error) {
 	return event.Repository.FullName, event.Action, nil
 }
 
-func oneLine(s string) string {
-	s = strings.ReplaceAll(s, "\n", "")
-
-	return strings.ReplaceAll(s, "\r", "")
-}
+func oneLine(s string) string { return strings.ReplaceAll(strings.ReplaceAll(s, "\n", ""), "\r", "") }
