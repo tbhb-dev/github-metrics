@@ -6,8 +6,6 @@ package worker
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -18,11 +16,9 @@ import (
 
 const batchSize = 100
 
-var errMissingFields = errors.New("pull request repository or action is empty")
-
-// Recorder records a pull request event, without a telemetry dependency.
+// Recorder records a queued event, without a telemetry dependency.
 type Recorder interface {
-	RecordPullRequest(repository, action string) error
+	Record(ctx context.Context, event string, body []byte) error
 }
 
 // Queue is the part of the store that a worker consumes.
@@ -31,7 +27,7 @@ type Queue interface {
 	Remove(seq uint64) error
 }
 
-// Worker records pull request events and removes consumed queue entries.
+// Worker records events and removes consumed queue entries.
 type Worker struct {
 	queue    Queue
 	recorder Recorder
@@ -93,45 +89,12 @@ func (w *Worker) Pass(ctx context.Context) error {
 }
 
 func (w *Worker) record(ctx context.Context, entry store.Entry) bool {
-	if entry.Event != "pull_request" {
-		w.log.WarnContext(ctx, "unhandled event", "event", oneLine(entry.Event))
-
-		return false
-	}
-
-	repository, action, err := parse(entry.Body)
-	if err != nil {
-		w.log.WarnContext(ctx, "unhandled event", "reason", "bad pull request body")
-
-		return false
-	}
-
-	err = w.recorder.RecordPullRequest(repository, action)
+	err := w.recorder.Record(ctx, entry.Event, entry.Body)
 	if err != nil {
 		w.log.WarnContext(ctx, "recording failed", "event", oneLine(entry.Event))
 	}
 
 	return err == nil
-}
-
-func parse(body []byte) (string, string, error) {
-	var event struct {
-		Repository struct {
-			FullName string `json:"full_name"` //nolint:tagliatelle // GitHub uses this field name
-		} `json:"repository"`
-		Action string `json:"action"`
-	}
-
-	err := json.Unmarshal(body, &event)
-	if err != nil {
-		return "", "", fmt.Errorf("parse pull request: %w", err)
-	}
-
-	if event.Repository.FullName == "" || event.Action == "" {
-		return "", "", errMissingFields
-	}
-
-	return event.Repository.FullName, event.Action, nil
 }
 
 func oneLine(s string) string { return strings.ReplaceAll(strings.ReplaceAll(s, "\n", ""), "\r", "") }
