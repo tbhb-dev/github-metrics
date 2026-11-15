@@ -32,6 +32,10 @@ const (
 	maxRetryAfter = 15 * time.Minute
 	// maxETags bounds the stored tags.
 	maxETags = 10000
+	// pastResetWait is the wait for a spent non-core response whose reset is
+	// already past, as when the local clock runs ahead of GitHub's.
+	pastResetWait = 3 * time.Second
+
 	// bodyProbe is how much of a 403 body is searched for a secondary limit.
 	bodyProbe = 4096
 
@@ -168,8 +172,9 @@ func New(
 // URL of an earlier response. A new `ETag` is stored on receipt, so a caller
 // that can't use a 200 body gets only a 304 on the next call and must clear
 // the tag first. A redirect returns a status error. It waits for a budget slot at the given
-// priority. A 401 renews the token once. A secondary rate limit response
-// backs the budget off and retries, up to four sends in all.
+// priority. A 401 renews the token once. A secondary rate limit response, or
+// a 403 or 429 with no primary budget left, backs the budget off and retries, up to
+// four sends in all.
 func (c *Client) Get(ctx context.Context, priority budget.Priority, target string) (*Response, error) {
 	full, err := c.resolve(target)
 	if err != nil {
@@ -179,15 +184,10 @@ func (c *Client) Get(ctx context.Context, priority budget.Priority, target strin
 	renew := false
 	renewed := false
 
-	for range maxAttempts {
-		waitErr := c.budget.Wait(ctx, priority)
-		if waitErr != nil {
-			return nil, fmt.Errorf("get %s: %w", full.Path, waitErr)
-		}
-
-		token, tokenErr := c.token(ctx, renew)
-		if tokenErr != nil {
-			return nil, tokenErr
+	for attempt := range maxAttempts {
+		token, readyErr := c.ready(ctx, priority, full.Path, renew)
+		if readyErr != nil {
+			return nil, readyErr
 		}
 
 		renewed = renewed || renew
@@ -207,6 +207,11 @@ func (c *Client) Get(ctx context.Context, priority budget.Priority, target strin
 			return c.response(full.String(), got), nil
 		case got.status == http.StatusUnauthorized && !renewed:
 			renew = true
+		case isPrimaryLimit(got):
+			pauseErr := c.primaryBackoff(ctx, got, attempt == maxAttempts-1)
+			if pauseErr != nil {
+				return nil, fmt.Errorf("get %s: %w", full.Path, pauseErr)
+			}
 		case isSecondaryLimit(got):
 			c.budget.Backoff(retryAfter(got.header))
 		default:
@@ -215,6 +220,16 @@ func (c *Client) Get(ctx context.Context, priority budget.Priority, target strin
 	}
 
 	return nil, fmt.Errorf("get %s: %w", full.Path, ErrGaveUp)
+}
+
+// ready waits for a budget slot and returns the token for one send.
+func (c *Client) ready(ctx context.Context, priority budget.Priority, path string, renew bool) (string, error) {
+	waitErr := c.budget.Wait(ctx, priority)
+	if waitErr != nil {
+		return "", fmt.Errorf("get %s: %w", path, waitErr)
+	}
+
+	return c.token(ctx, renew)
 }
 
 // reply is what one send received.
@@ -304,7 +319,7 @@ func (c *Client) observe(header http.Header) {
 		return
 	}
 
-	c.budget.Observe(remaining, time.Unix(reset, 0))
+	c.budget.Observe(header.Get("X-Ratelimit-Resource"), remaining, time.Unix(reset, 0))
 }
 
 // response builds the result of a 200 or 304 and stores a new `ETag`.
@@ -322,7 +337,8 @@ func (c *Client) response(key string, got *reply) *Response {
 }
 
 // isSecondaryLimit matches a 429, and a 403 that mentions a secondary limit or
-// has a `retry-after` header.
+// has a `retry-after` header. isPrimaryLimit takes a response first, so a 429
+// with zero requests left isn't secondary.
 func isSecondaryLimit(got *reply) bool {
 	if got.status == http.StatusTooManyRequests {
 		return true
@@ -332,9 +348,99 @@ func isSecondaryLimit(got *reply) bool {
 		return false
 	}
 
+	return namesSecondary(got)
+}
+
+// isPrimaryLimit matches a 403 or 429 whose `x-ratelimit-remaining` is zero:
+// the primary budget of the response's resource is spent. A `retry-after`
+// header doesn't change that. The wait covers both.
+func isPrimaryLimit(got *reply) bool {
+	return (got.status == http.StatusForbidden || got.status == http.StatusTooManyRequests) &&
+		strings.TrimSpace(got.header.Get("X-Ratelimit-Remaining")) == "0"
+}
+
+// namesSecondary is true when a response has any `retry-after` header or a
+// body that mentions a secondary limit. A `retry-after` header alone counts
+// as secondary, so such a response pauses the shared limiter too.
+func namesSecondary(got *reply) bool {
 	probe := strings.ToLower(string(got.body[:min(len(got.body), bodyProbe)]))
 
 	return got.header.Get("Retry-After") != "" || strings.Contains(probe, "secondary rate limit")
+}
+
+// primaryBackoff waits out a spent primary budget for the longer of the
+// `retry-after` and the reset. The core budget stops the shared limiter for
+// that time. Another resource, such as search or GraphQL, pauses only this
+// request, so core callers keep running, unless the response is also
+// secondary, which pauses the shared limiter too. Any `retry-after` header
+// makes a response secondary, as does a body with the secondary-limit text. A
+// secondary response with no wait of its own retries, since the shared pause
+// is the wait and the next send waits it out in the limiter. It returns
+// ErrGaveUp for another resource that isn't secondary and has no usable
+// reset, because a retry would fail the same way. A reset that's already
+// past counts as usable: the clocks may differ, so it waits pastResetWait and
+// retries. On the last attempt it skips the own wait,
+// since no send is left.
+func (c *Client) primaryBackoff(ctx context.Context, got *reply, last bool) error {
+	resource := got.header.Get("X-Ratelimit-Resource")
+	wait := max(untilReset(got.header), retryAfter(got.header))
+
+	if resource == "" || resource == budget.CoreResource {
+		c.budget.Backoff(wait)
+
+		return nil
+	}
+
+	secondary := namesSecondary(got)
+	if secondary {
+		c.budget.Backoff(retryAfter(got.header))
+	}
+
+	if wait <= 0 {
+		if secondary {
+			return nil
+		}
+
+		if !hasReset(got.header) {
+			return ErrGaveUp
+		}
+
+		wait = pastResetWait
+	}
+
+	if last {
+		return nil
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for reset: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
+}
+
+// hasReset is true when `x-ratelimit-reset` holds a positive integer, even
+// one that's past.
+func hasReset(header http.Header) bool {
+	reset, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-Ratelimit-Reset")), 10, 64)
+
+	return err == nil && reset > 0
+}
+
+// untilReset returns the time to the `x-ratelimit-reset` of a response,
+// clamped to the budget's reset cap. It's zero when the header is absent,
+// invalid or past, which leaves the wait to the budget's doubling backoff.
+func untilReset(header http.Header) time.Duration {
+	reset, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-Ratelimit-Reset")), 10, 64)
+	if err != nil {
+		return 0
+	}
+
+	return min(max(time.Until(time.Unix(reset, 0)), 0), budget.MaxReset)
 }
 
 // retryAfter returns the `retry-after` wait, as seconds or an HTTP date,
@@ -343,7 +449,7 @@ func retryAfter(header http.Header) time.Duration {
 	value := strings.TrimSpace(header.Get("Retry-After"))
 
 	seconds, err := strconv.ParseInt(value, 10, 64)
-	if err == nil {
+	if err == nil && !strings.HasPrefix(value, "+") {
 		if seconds <= 0 {
 			return 0
 		}

@@ -40,6 +40,14 @@ const (
 	// until the reset.
 	Floor = 500
 
+	// CoreResource is the `x-ratelimit-resource` value of the budget this
+	// limiter guards. Headers of any other resource are ignored.
+	CoreResource = "core"
+	// MaxReset caps how far ahead an observed reset may stop work. The
+	// primary window is one hour, so a later reset is a skewed clock or a
+	// bad header.
+	MaxReset = time.Hour
+
 	firstBackoff  = time.Minute
 	backoffFactor = 2
 	maxBackoff    = 15 * time.Minute
@@ -121,14 +129,21 @@ func (l *Limiter) Wait(ctx context.Context, priority Priority) error {
 }
 
 // Observe records the rate limit headers of a response. Under the floor it
-// stops all work until reset. A zero or past reset time has no effect.
-func (l *Limiter) Observe(remaining int, reset time.Time) {
-	if remaining >= Floor {
+// stops all work until reset, or for MaxReset if the reset is later than
+// that. A zero or past reset time has no effect. Headers of a resource other
+// than CoreResource are ignored, because their limits are far below the
+// floor. An empty resource counts as core.
+func (l *Limiter) Observe(resource string, remaining int, reset time.Time) {
+	if remaining >= Floor || (resource != "" && resource != CoreResource) {
 		return
 	}
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if horizon := time.Now().Add(MaxReset); reset.After(horizon) {
+		reset = horizon
+	}
 
 	l.blockUntil(reset)
 }

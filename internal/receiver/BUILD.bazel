@@ -19,9 +19,10 @@ go_library(
 go_test(
     name = "receiver_test",
     srcs = [
+        "fuzz_internal_test.go",
         "receiver_test.go",
         "server_test.go",
     ],
+    embed = [":receiver"],
     visibility = ["//:__pkg__"],
-    deps = [":receiver"],
 )

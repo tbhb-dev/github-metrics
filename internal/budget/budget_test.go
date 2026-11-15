@@ -137,7 +137,7 @@ func TestShortBackoffKeepsTheLongerReset(t *testing.T) {
 		lim := budget.New()
 		reset := time.Now().Add(20 * time.Minute)
 
-		lim.Observe(budget.Floor-1, reset)
+		lim.Observe(budget.CoreResource, budget.Floor-1, reset)
 		lim.Backoff(time.Second)
 		mustWait(t, lim, budget.Webhook)
 
@@ -155,10 +155,10 @@ func TestLowRemainingStopsUntilReset(t *testing.T) {
 		lim := budget.New()
 		reset := time.Now().Add(20 * time.Minute)
 
-		lim.Observe(budget.Floor, reset)
+		lim.Observe(budget.CoreResource, budget.Floor, reset)
 		mustWait(t, lim, budget.Webhook)
 
-		lim.Observe(budget.Floor-1, reset)
+		lim.Observe(budget.CoreResource, budget.Floor-1, reset)
 		mustWait(t, lim, budget.Webhook)
 
 		if now := time.Now(); now.Before(reset) {
@@ -229,5 +229,31 @@ func TestCancelledWaitLeavesTheQueue(t *testing.T) {
 		}
 
 		mustWait(t, lim, budget.Backfill)
+	})
+}
+
+// TestFarFutureResetIsCapped checks that a reset beyond MaxReset stops work
+// for MaxReset only, and that another resource's headers stop nothing.
+func TestFarFutureResetIsCapped(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		lim := budget.New()
+		start := time.Now()
+
+		lim.Observe("search", 0, start.Add(48*time.Hour))
+		mustWait(t, lim, budget.Webhook)
+
+		if waited := time.Since(start); waited > time.Second {
+			t.Fatalf("another resource stopped work for %v", waited)
+		}
+
+		lim.Observe(budget.CoreResource, budget.Floor-1, start.Add(48*time.Hour))
+		mustWait(t, lim, budget.Webhook)
+
+		waited := time.Since(start)
+		if waited < budget.MaxReset || waited > budget.MaxReset+time.Minute {
+			t.Fatalf("waited %v, want about %v", waited, budget.MaxReset)
+		}
 	})
 }

@@ -17,12 +17,14 @@ go_library(
 go_test(
     name = "ghclient_test",
     srcs = [
+        "fuzz_internal_test.go",
         "ghclient_test.go",
+        "limit_test.go",
         "synctest_test.go",
     ],
+    embed = [":ghclient"],
     visibility = ["//:__pkg__"],
     deps = [
-        ":ghclient",
         "//internal/budget",
     ],
 )
