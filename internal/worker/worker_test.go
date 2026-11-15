@@ -5,12 +5,16 @@ package worker_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/store"
 	"github.com/tbhb-dev/github-metrics/internal/worker"
@@ -21,6 +25,7 @@ const (
 	removeFirst              = "remove 1"
 	pullRequestEvent         = "pull_request"
 	openedBody               = `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"opened"}`
+	badBodyReason            = "bad pull request body"
 )
 
 type queueStub struct {
@@ -64,6 +69,8 @@ func TestParse(t *testing.T) {
 		{"bad JSON", `{"action":`, "", "", true},
 		{"bad action type", `{"action":1}`, "", "", true},
 		{"bad repository type", `{"repository":{"full_name":1}}`, "", "", true},
+		{"empty repository", `{"repository":{"full_name":""},"action":"opened"}`, "", "", true},
+		{"empty action", `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":""}`, "", "", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -82,13 +89,24 @@ func TestPass(t *testing.T) {
 	for _, test := range []struct {
 		name, event, body, log string
 		want                   []string
+		queued                 int
 	}{
 		{
 			"record before remove", pullRequestEvent, openedBody, "",
 			[]string{"record tbhb-dev/github-metrics opened", removeFirst},
+			0,
 		},
-		{"bad body removed", pullRequestEvent, `{"action":`, "bad pull request body", []string{removeFirst}},
-		{"other event removed", "ping", openedBody, "discarded event", []string{removeFirst}},
+		{"bad body kept", pullRequestEvent, `{"action":`, badBodyReason, nil, 1},
+		{"empty fields kept", pullRequestEvent, `{}`, badBodyReason, nil, 1},
+		{
+			"empty repository kept", pullRequestEvent, `{"repository":{"full_name":""},"action":"opened"}`,
+			badBodyReason, nil, 1,
+		},
+		{
+			"empty action kept", pullRequestEvent, `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":""}`,
+			badBodyReason, nil, 1,
+		},
+		{"other event kept", "ping\r\n", openedBody, "event=ping", nil, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -118,6 +136,15 @@ func TestPass(t *testing.T) {
 			err := worker.New(&queue, recorder, slog.New(slog.NewTextHandler(&logs, nil))).Pass(t.Context())
 			if err != nil || !reflect.DeepEqual(calls, test.want) || !strings.Contains(logs.String(), test.log) {
 				t.Fatalf("Pass: %v, calls = %v, logs = %q", err, calls, logs.String())
+			}
+
+			if len(entries) != test.queued {
+				t.Fatalf("queued = %d, want %d", len(entries), test.queued)
+			}
+
+			if test.queued != 0 &&
+				(strings.Count(logs.String(), "level=WARN") != 1 || strings.Contains(logs.String(), test.body)) {
+				t.Fatalf("expected one warning without the body, logs = %q", logs.String())
 			}
 		})
 	}
@@ -220,5 +247,161 @@ func testRecorderRetry(t *testing.T, passes int) {
 	entries, err := queue.Pending(batchSize)
 	if err != nil || len(entries) != 2*(2-passes) || records != 2*passes-1 {
 		t.Fatalf("pending: %v, entries = %v, records = %d", err, entries, records)
+	}
+}
+
+func TestStoreErrorStops(t *testing.T) {
+	t.Parallel()
+
+	errStore := store.ErrCorrupt
+
+	for _, operation := range []string{"pending", "remove"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Parallel()
+
+			var reads, records, removes int
+
+			queue := queueStub{
+				t:     t,
+				reads: 0,
+				pending: func(int) ([]store.Entry, error) {
+					reads++
+
+					if operation == "pending" {
+						return nil, errStore
+					}
+
+					return twoEntries(), nil
+				},
+				remove: func(uint64) error {
+					removes++
+
+					return errStore
+				},
+			}
+			consumer := worker.New(&queue, countRecords(&records), slog.New(slog.DiscardHandler))
+
+			err := consumer.Run(t.Context(), time.Second)
+			want := 0
+
+			if operation == "remove" {
+				want = 1
+			}
+
+			if !errors.Is(err, errStore) || reads != 1 || records != want || removes != want {
+				t.Fatalf("Run: %v, reads = %d, records = %d, removes = %d", err, reads, records, removes)
+			}
+		})
+	}
+}
+
+func TestRunPollsAndCancelStops(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		var reads int
+
+		queue := queueStub{
+			t:     t,
+			reads: 0,
+			pending: func(int) ([]store.Entry, error) {
+				reads++
+
+				return nil, nil
+			},
+			remove: func(uint64) error {
+				t.Error("unexpected Remove")
+
+				return nil
+			},
+		}
+		consumer := worker.New(
+			&queue,
+			recorderFunc(func(_, _ string) error {
+				t.Error("unexpected record")
+
+				return nil
+			}),
+			slog.New(slog.DiscardHandler),
+		)
+		done := make(chan error, 1)
+
+		go func() { done <- consumer.Run(ctx, time.Second) }()
+
+		synctest.Wait()
+
+		if reads != 1 {
+			t.Fatalf("startup reads = %d, want 1", reads)
+		}
+
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		if reads != 2 {
+			t.Fatalf("reads after poll = %d, want 2", reads)
+		}
+
+		cancel()
+
+		err := <-done
+		if err != nil || reads != 2 {
+			t.Fatalf("cancel: %v, reads = %d", err, reads)
+		}
+	})
+}
+
+func TestCancelDuringBatchStops(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var records, removes int
+
+	queue := queueStub{
+		t:     t,
+		reads: 0,
+		pending: func(int) ([]store.Entry, error) {
+			return twoEntries(), nil
+		},
+		remove: func(uint64) error {
+			removes++
+
+			return nil
+		},
+	}
+	consumer := worker.New(
+		&queue,
+		recorderFunc(func(_, _ string) error {
+			records++
+
+			cancel()
+
+			return nil
+		}),
+		slog.New(slog.DiscardHandler),
+	)
+
+	err := consumer.Pass(ctx)
+	if err != nil || records != 1 || removes != 1 {
+		t.Fatalf("cancel: %v, records = %d, removes = %d", err, records, removes)
+	}
+}
+
+func twoEntries() []store.Entry {
+	return []store.Entry{
+		{Delivery: "d1", Event: pullRequestEvent, Body: []byte(openedBody), Seq: 1},
+		{Delivery: "d2", Event: pullRequestEvent, Body: []byte(openedBody), Seq: 2},
+	}
+}
+
+func countRecords(records *int) recorderFunc {
+	return func(_, _ string) error {
+		*records++
+
+		return nil
 	}
 }

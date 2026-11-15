@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Tony Burns
 
-// Command github-metrics runs the webhook receiver.
+// Command github-metrics runs the webhook receiver and queue worker.
 //
 // WEBHOOK_SECRET_FILE names a file that contains the App's webhook secret.
 //
@@ -29,17 +29,20 @@ import (
 
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
 	"github.com/tbhb-dev/github-metrics/internal/store"
+	"github.com/tbhb-dev/github-metrics/internal/worker"
 )
 
 const (
 	shutdownTimeout = 10 * time.Second
 	probeTimeout    = 3 * time.Second
+	pollInterval    = time.Second
 )
 
 var (
 	errNoSecretFile = errors.New("WEBHOOK_SECRET_FILE is not set")
 	errEmptySecret  = errors.New("webhook secret file is empty")
 	errNoStoreFile  = errors.New("STORE_FILE is not set")
+	errNoRecorder   = errors.New("no recorder is configured")
 )
 
 func main() {
@@ -96,6 +99,14 @@ func run(addr string, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	workerErr := make(chan error, 1)
+
+	go func() {
+		workerErr <- worker.New(repo, noopRecorder{}, log).Run(ctx, pollInterval)
+
+		stop()
+	}()
+
 	serveErr := make(chan error, 1)
 
 	go func() { serveErr <- srv.ListenAndServe() }()
@@ -104,25 +115,21 @@ func run(addr string, log *slog.Logger) error {
 
 	select {
 	case err = <-serveErr:
-		return errors.Join(err, repo.Close())
+		// Shut down the worker before closing its store.
 	case <-ctx.Done():
 	}
+
+	stop()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	err = srv.Shutdown(shutdownCtx)
-	if err != nil {
-		return errors.Join(fmt.Errorf("shut down: %w", err), repo.Close())
-	}
-
-	err = repo.Close()
-	if err != nil {
-		return fmt.Errorf("close store: %w", err)
-	}
-
-	return nil
+	return errors.Join(err, srv.Shutdown(shutdownCtx), <-workerErr, repo.Close())
 }
+
+type noopRecorder struct{}
+
+func (noopRecorder) RecordPullRequest(_, _ string) error { return errNoRecorder }
 
 // probe asks the local health endpoint and returns the exit code.
 func probe(addr string) int {

@@ -7,6 +7,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -16,6 +17,8 @@ import (
 )
 
 const batchSize = 100
+
+var errMissingFields = errors.New("pull request repository or action is empty")
 
 // Recorder records a pull request event, without a telemetry dependency.
 type Recorder interface {
@@ -59,7 +62,9 @@ func (w *Worker) Run(ctx context.Context, interval time.Duration) error {
 	}
 }
 
-// Pass drains batches until the queue is empty, the context ends, or the store fails.
+// Pass drains batches until the queue is empty or processing stops. Only a
+// successful record removes an entry; otherwise it leaves that entry and the
+// rest of its batch queued for the next poll. A store error is returned to the caller.
 func (w *Worker) Pass(ctx context.Context) error {
 	for ctx.Err() == nil {
 		entries, err := w.queue.Pending(batchSize)
@@ -89,16 +94,16 @@ func (w *Worker) Pass(ctx context.Context) error {
 
 func (w *Worker) record(ctx context.Context, entry store.Entry) bool {
 	if entry.Event != "pull_request" {
-		w.log.InfoContext(ctx, "discarded event", "event", oneLine(entry.Event))
+		w.log.WarnContext(ctx, "unhandled event", "event", oneLine(entry.Event))
 
-		return true
+		return false
 	}
 
 	repository, action, err := parse(entry.Body)
 	if err != nil {
-		w.log.WarnContext(ctx, "discarded event", "reason", "bad pull request body")
+		w.log.WarnContext(ctx, "unhandled event", "reason", "bad pull request body")
 
-		return true
+		return false
 	}
 
 	err = w.recorder.RecordPullRequest(repository, action)
@@ -120,6 +125,10 @@ func parse(body []byte) (string, string, error) {
 	err := json.Unmarshal(body, &event)
 	if err != nil {
 		return "", "", fmt.Errorf("parse pull request: %w", err)
+	}
+
+	if event.Repository.FullName == "" || event.Action == "" {
+		return "", "", errMissingFields
 	}
 
 	return event.Repository.FullName, event.Action, nil
