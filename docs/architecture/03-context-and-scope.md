@@ -24,4 +24,4 @@
 
 In scope: PR, review, review request, commit, reopen, merge, and close activity for every repository the App sees. Out of scope for the first release: checks, issue comments, pushes, review threads, and write access.
 
-The boundary with the organization collector is pending its owner and unverified. [D13](decisions/0013-the-boundary-with-the-organization-collector-pen.md) records it.
+This design doesn't cover CI or Actions today, and it doesn't assume that another service emits these PR metrics. [D13](decisions/0013-the-boundary-with-the-organization-collector-pen.md) records the earlier boundary, which the operator's later decision superseded.

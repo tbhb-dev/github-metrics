@@ -34,7 +34,7 @@ The planned worker ignores every other action of these events, such as `edited` 
 | `pull_request_review_thread` | REST doesn't expose a thread's resolved state, so reconciliation couldn't heal a missed delivery. The design takes telemetry content only from REST, never from webhook bodies. Its payloads would also bring review comment text and diff hunks into the queue |
 | `pull_request_review_comment` | Each review comment belongs to a review, and the `pull_request_review` event already reports the submission |
 | `issue_comment` | Conversation comments don't affect the timing metrics, and the service has no use for it |
-| `check_run` and `check_suite` | Continuous integration (CI) belongs to the organization collector. These events also need Checks read, and they arrive once per job |
+| `check_run` and `check_suite` | This design doesn't cover continuous integration (CI) today. These events also need Checks read, and they arrive once per job |
 | `push` | The App can read Contents, but the PR commits endpoint already gives the same commits |
 | Issues, Actions, and workflow events | Later releases may add them |
 

@@ -10,7 +10,6 @@
 | Deleted bodies remain in the `bbolt` file | Raw bodies persist physically until `bbolt` reuses the pages, even after the queue marks them deleted | Proposed: mode `0600` and a dedicated volume. Whether to back up the queue is open, and plan step 6 decides it | Unverified |
 | The client stores an `ETag` on receipt | A 200 body the reconciler can't use leaves a stale tag | The planned reconciler clears the tag in that case | New |
 | `ETag` values change when the installation token rotates | Fewer free `304` answers | The worst-case budget already assumes every request returns a full response | New (appendix E) |
-| The organization collector already emits PR metrics | Duplicate series and doubled API use | Plan step 4 confirms the boundary with that design's owner before step 5 starts | Unverified |
 | An outage of more than 24 hours | Milestones from the outage get traces but no metric observations | Accepted, since the traces still record each duration | New |
 | A crash between a span export and its store write | That reconcile run's spans export twice | Accepted, since the window is one write long | New |
 | A crash during a collector outage | The service loses every metric observation since the last accepted export | Accepted, since the worker commits milestones first and they never double | New |
@@ -31,7 +30,7 @@ Step 1 finished. Steps 2 to 8 remain open work. Today `main` has the receiver, t
 | 1 | The operator answers D1 and D2 | Finished: the operator accepted [D1](decisions/0001-may-tbhb-dev-create-the-read-only-github-app-and.md) and [D2](decisions/0002-may-the-webhook-path-face-the-public-internet-th.md) on 2026-11-14 | Operator |
 | 2 | A spike exports one backdated, deterministic trace to the collector | The trace appears in the backend under its derived ID, with GitHub's timestamps | Platform engineering |
 | 3 | The service repository with the receiver, store, worker, and tests | Tests pass for a replayed delivery, a duplicate, a reused delivery ID with a different body, an out-of-order pair, and a bad signature | Platform engineering |
-| 4 | The organization collector's owner confirms the boundary | That design or this one records the confirmation | Platform engineering |
+| 4 | Dropped: the operator deleted the organization collector design, so there is no boundary to confirm | [D13](decisions/0013-the-boundary-with-the-organization-collector-pen.md) records the supersession | Platform engineering |
 | 5 | The reconciler, the shared request budget, and the backfill | A test against recorded responses shows a full run under its request budget and pacing | Platform engineering |
 | 6 | A threat-model follow-up design covers the receiver gaps, the tunnel acceptance gates, secret and store file modes, store backup and corruption, secret retirement and key rotation, and backend access and retention | That design merges with each gate specified, and the operator confirms the backend input | Platform engineering |
 | 7 | The App from its manifest, the secrets in 1Password, the published image and Compose file, and the host operator's deployment with the tunnel | Step 6 has merged, a test delivery from the App's settings page returns `202`, and a `GET` on any path returns `404` | Platform engineering and the host operator |
