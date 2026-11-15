@@ -216,7 +216,7 @@ func TestSpentCoreResetIsCappedAtOneHour(t *testing.T) {
 func TestImplausibleResetIsInvalid(t *testing.T) {
 	t.Parallel()
 
-	for _, reset := range []string{strconv.FormatInt(math.MaxInt64, 10), "99999999999", "+99", "30"} {
+	for _, reset := range []string{strconv.FormatInt(math.MaxInt64, 10), "99999999999", "+99", "30", "59", "4102444801"} {
 		synctestRun(t, func(ctx context.Context) {
 			var calls atomic.Int32
 
@@ -226,6 +226,26 @@ func TestImplausibleResetIsInvalid(t *testing.T) {
 
 			_, err := getWaited(ctx, t, client)
 			if !errors.Is(err, ghclient.ErrGaveUp) || calls.Load() != 1 {
+				t.Fatalf("reset %q: err = %v, calls = %d", reset, err, calls.Load())
+			}
+		})
+	}
+}
+
+// TestResetBoundsAreValid covers the first value each bound accepts.
+func TestResetBoundsAreValid(t *testing.T) {
+	t.Parallel()
+
+	for _, reset := range []string{"60", "4102444800"} {
+		synctestRun(t, func(ctx context.Context) {
+			var calls atomic.Int32
+
+			header := spentHeader("search", 0)
+			header.Set("X-Ratelimit-Reset", reset)
+			client := fakeClient(t, limitedOnce(http.StatusForbidden, header, &calls))
+
+			_, err := getWaited(ctx, t, client)
+			if err != nil || calls.Load() != 2 {
 				t.Fatalf("reset %q: err = %v, calls = %d", reset, err, calls.Load())
 			}
 		})
@@ -244,7 +264,7 @@ func TestSpentCoreImplausibleResetBacksOffBriefly(t *testing.T) {
 			client := fakeClient(t, limitedOnce(http.StatusForbidden, header, &calls))
 
 			waited, err := getWaited(ctx, t, client)
-			if err != nil || calls.Load() != 2 || waited > 2*time.Minute {
+			if err != nil || calls.Load() != 2 || waited < time.Minute || waited > 2*time.Minute {
 				t.Fatalf("reset %q: err = %v, calls = %d, waited %v", reset, err, calls.Load(), waited)
 			}
 		})
