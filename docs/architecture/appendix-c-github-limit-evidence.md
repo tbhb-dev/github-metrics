@@ -2,7 +2,7 @@
 
 Today the repository has a webhook receiver, a request budget, and a GitHub client. Everything else on this page that describes the service is design or planned.
 
-This page moves the evidence tables out of the original design, appendix A of the `drafts/github-metrics` folder in the `tbhb-dev/wiki` repository at commit `8e06fb1`. Each claim has one label. Existing means a primary source states it, and the design's author read that source on 2026-11-13. New means the design proposes it. Unverified means nobody has checked it yet. The tables keep every figure, label, and source from the design.
+This page moves the evidence tables out of the original design, appendix A of the `drafts/github-metrics` folder in the `tbhb-dev/wiki` repository at commit `8e06fb1`. Each claim has one label. Existing means a primary source states it, and the design's author read that source on 2026-11-13. New means the design proposes it. Unverified means nobody has checked it yet. Superseded means a later operator decision replaced the claim. The tables keep every figure, label, and source from the design, except the organization collector row, which has the Superseded label.
 
 ## GitHub documentation pages
 
@@ -112,5 +112,5 @@ This section concerns the planned export path. The code has no OpenTelemetry (OT
 | --- | --- | --- |
 | tbhb-dev has tens of repositories, about 40 | Unverified | An assumption for the budget, and the first run would count them |
 | About 30 PRs change an hour at peak | Unverified | An assumption for the budget |
-| An earlier organization collector design covered continuous integration (CI), Actions, and organization-level counters | Superseded | On 2026-11-14 the operator decided that this design replaces it and deleted it, so this design doesn't assume that another service emits these metrics |
+| An earlier organization collector design covered continuous integration (CI), Actions, and organization-level counters | Superseded | On 2026-11-14 the operator decided that this design replaces it, so this design doesn't assume that another service emits these metrics |
 | This repository can't render D2 diagrams | Existing | `MODULE.bazel` on `main` has no D2 module |
