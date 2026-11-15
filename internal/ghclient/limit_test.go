@@ -121,6 +121,30 @@ func TestSpentNonCoreLimitWithoutResetGivesUp(t *testing.T) {
 	})
 }
 
+func TestSpentNonCoreSecondaryWithoutWaitRetries(t *testing.T) {
+	t.Parallel()
+
+	synctestRun(t, func(ctx context.Context) {
+		var calls atomic.Int32
+
+		client := fakeClient(t, func(*http.Request) *http.Response {
+			if calls.Add(1) == 1 {
+				res := reply(http.StatusForbidden, spentHeader("search", 0))
+				res.Body = io.NopCloser(strings.NewReader(`{"message":"You have exceeded a secondary rate limit."}`))
+
+				return res
+			}
+
+			return reply(http.StatusOK, http.Header{})
+		})
+
+		_, err := getWaited(ctx, t, client)
+		if err != nil || calls.Load() != 2 {
+			t.Fatalf("err = %v, calls = %d", err, calls.Load())
+		}
+	})
+}
+
 func TestSpentCore429WaitsForReset(t *testing.T) {
 	t.Parallel()
 
@@ -141,20 +165,22 @@ func TestSpentCore429WaitsForReset(t *testing.T) {
 func TestSpentCoreResetIsCappedAtOneHour(t *testing.T) {
 	t.Parallel()
 
-	for _, reset := range []int64{
-		time.Now().Add(time.Hour).Unix(),
-		time.Now().Add(48 * time.Hour).Unix(),
-		math.MaxInt64,
-		math.MinInt64,
+	// Each reset is built inside the bubble, so each is relative to the fake clock.
+	for _, reset := range []func(now time.Time) int64{
+		func(now time.Time) int64 { return now.Add(time.Hour).Unix() },
+		func(now time.Time) int64 { return now.Add(48 * time.Hour).Unix() },
+		func(time.Time) int64 { return math.MaxInt64 },
+		func(time.Time) int64 { return math.MinInt64 },
 	} {
 		synctestRun(t, func(ctx context.Context) {
 			var calls atomic.Int32
 
-			client := fakeClient(t, limitedOnce(http.StatusForbidden, spentHeader(budget.CoreResource, reset), &calls))
+			value := reset(time.Now())
+			client := fakeClient(t, limitedOnce(http.StatusForbidden, spentHeader(budget.CoreResource, value), &calls))
 
 			waited, err := getWaited(ctx, t, client)
 			if err != nil || waited > time.Hour+time.Minute {
-				t.Fatalf("reset %d: err = %v, waited %v", reset, err, waited)
+				t.Fatalf("reset %d: err = %v, waited %v", value, err, waited)
 			}
 		})
 	}

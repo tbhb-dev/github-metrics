@@ -169,7 +169,7 @@ func New(
 // that can't use a 200 body gets only a 304 on the next call and must clear
 // the tag first. A redirect returns a status error. It waits for a budget slot at the given
 // priority. A 401 renews the token once. A secondary rate limit response, or
-// a 403 with no primary budget left, backs the budget off and retries, up to
+// a 403 or 429 with no primary budget left, backs the budget off and retries, up to
 // four sends in all.
 func (c *Client) Get(ctx context.Context, priority budget.Priority, target string) (*Response, error) {
 	full, err := c.resolve(target)
@@ -355,8 +355,9 @@ func isPrimaryLimit(got *reply) bool {
 		strings.TrimSpace(got.header.Get("X-Ratelimit-Remaining")) == "0"
 }
 
-// namesSecondary is true when a response has a `retry-after` header or a body
-// that mentions a secondary limit.
+// namesSecondary is true when a response has any `retry-after` header or a
+// body that mentions a secondary limit. A `retry-after` header alone counts
+// as secondary, so such a response pauses the shared limiter too.
 func namesSecondary(got *reply) bool {
 	probe := strings.ToLower(string(got.body[:min(len(got.body), bodyProbe)]))
 
@@ -367,9 +368,13 @@ func namesSecondary(got *reply) bool {
 // `retry-after` and the reset. The core budget stops the shared limiter for
 // that time. Another resource, such as search or GraphQL, pauses only this
 // request, so core callers keep running, unless the response is also
-// secondary, which pauses the shared limiter too. It returns ErrGaveUp
-// for another resource with no wait to serve, because a retry would fail the
-// same way. On the last attempt it skips the own wait, since no send is left.
+// secondary, which pauses the shared limiter too. Any `retry-after` header
+// makes a response secondary, as does a body with the secondary-limit text. A
+// secondary response with no wait of its own retries, since the shared pause
+// is the wait and the next send waits it out in the limiter. It returns
+// ErrGaveUp for another resource with no wait that isn't secondary, because
+// a retry would fail the same way. On the last attempt it skips the own wait,
+// since no send is left.
 func (c *Client) primaryBackoff(ctx context.Context, got *reply, last bool) error {
 	resource := got.header.Get("X-Ratelimit-Resource")
 	wait := max(untilReset(got.header), retryAfter(got.header))
@@ -380,11 +385,16 @@ func (c *Client) primaryBackoff(ctx context.Context, got *reply, last bool) erro
 		return nil
 	}
 
-	if namesSecondary(got) {
+	secondary := namesSecondary(got)
+	if secondary {
 		c.budget.Backoff(retryAfter(got.header))
 	}
 
 	if wait <= 0 {
+		if secondary {
+			return nil
+		}
+
 		return ErrGaveUp
 	}
 
