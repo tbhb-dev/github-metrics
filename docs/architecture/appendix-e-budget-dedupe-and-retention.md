@@ -67,7 +67,7 @@ Routing exists only in the design. The tunnel routes only the `/webhook` path fo
 | Delivery IDs, body hashes, and times | The dedupe table | 7 days, at most 200,000 entries |
 | Span IDs, milestones, watermarks, and `ETag` values | The store | The life of the store |
 
-Deletion from the store is logical. `bbolt` may not zero freed pages, so a deleted body can stay in the file and in any copy of it until `bbolt` reuses its pages (unverified). The design proposes mode `0600` for the store file, owned by the image's non-root user, on a volume that only this service mounts. The original design's threat-model follow-up settles the final modes, owner, and corruption handling.
+Deletion from the store is logical. `bbolt` may not zero freed pages, so a deleted body can stay in the file and in any copy of it until `bbolt` reuses its pages (unverified). The design proposes mode `0600` for the store file, owned by the image's non-root user, on a volume that only this service mounts. The threat-model follow-up, [plan step 6 on page 11](11-risks-and-technical-debt.md), settles the final modes, owner, and corruption handling.
 
 ## Related pages
 

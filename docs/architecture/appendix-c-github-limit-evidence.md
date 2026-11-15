@@ -100,11 +100,11 @@ This section concerns the planned export path. The code has no OpenTelemetry (OT
 | OTel treats an all-zero trace or span ID as invalid | Existing | W3C Trace Context and the OTel trace API specification |
 | The Go SDK accepts explicit start and end timestamps on spans | Existing, not re-read for this draft | OTel Go `trace.WithTimestamp` option |
 | A custom ID generator in the Go SDK can return the derived IDs | Unverified | Plan step 2 on [page 11](11-risks-and-technical-debt.md) |
-| The `vcs.*` attribute names match the current semantic conventions | Unverified | The conventions are in development, and step 3 pins a version |
+| The `vcs.*` attribute names match the current semantic conventions | Unverified | The conventions are in development, and [step 3](11-risks-and-technical-debt.md) pins a version |
 | The backend shows and searches spans dated weeks in the past | Unverified | Plan step 2 on [page 11](11-risks-and-technical-debt.md) |
 | Backends keep or drop a second span with an already-exported ID | Unverified | Nobody has tested it, and the design avoids re-exporting the root |
-| The host collector accepts OTel Protocol (OTLP) over HTTP on port 4318 | Unverified | Port 4318 is the OTLP default, and step 2 confirms it on the host |
-| Who can read the backends, and how long they keep this telemetry | Unverified | The operator confirms it in the threat-model follow-up, plan step 6 |
+| The host collector accepts OTel Protocol (OTLP) over HTTP on port 4318 | Unverified | Port 4318 is the OTLP default, and [step 2](11-risks-and-technical-debt.md) confirms it on the host |
+| Who can read the backends, and how long they keep this telemetry | Unverified | The operator confirms it in the threat-model follow-up, [plan step 6](11-risks-and-technical-debt.md) |
 
 ## Design assumptions
 
