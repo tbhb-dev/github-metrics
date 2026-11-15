@@ -15,7 +15,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 
 	"github.com/tbhb-dev/github-metrics/internal/store"
@@ -95,8 +94,8 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, repo st
 	outcome, err := repo.Enqueue(delivery, body.Bytes())
 	if err != nil {
 		log.ErrorContext(req.Context(), "enqueue delivery",
-			"delivery", strconv.Quote(delivery),
-			"event", strconv.Quote(event),
+			"delivery", oneLine(delivery),
+			"event", oneLine(event),
 			"error", err)
 		resp.WriteHeader(http.StatusInternalServerError)
 
@@ -114,6 +113,12 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, repo st
 		"bytes", size,
 		"outcome", result)
 	resp.WriteHeader(http.StatusAccepted)
+}
+
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+
+	return strings.ReplaceAll(s, "\r", "")
 }
 
 func reject(resp http.ResponseWriter, req *http.Request, log *slog.Logger) {
