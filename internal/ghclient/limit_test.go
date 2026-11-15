@@ -6,11 +6,14 @@ package ghclient_test
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/budget"
@@ -86,6 +89,8 @@ func TestSpentNonCoreLimitLeavesCoreRunning(t *testing.T) {
 			_, err := client.Get(ctx, budget.Webhook, "/search")
 			done <- err
 		}()
+
+		synctest.Wait() // search is now in its backoff
 
 		start := time.Now()
 
@@ -197,6 +202,87 @@ func TestRetryAfterRefusesPlusSign(t *testing.T) {
 		waited, err := waitAfterLimit(ctx, t, "+5")
 		if err != nil || waited < time.Minute {
 			t.Fatalf("err = %v, waited %v", err, waited)
+		}
+	})
+}
+
+func TestSpentLimitWaitsForLongerOfRetryAfterAndReset(t *testing.T) {
+	t.Parallel()
+
+	for _, resource := range []string{"search", budget.CoreResource} {
+		for _, status := range []int{http.StatusForbidden, http.StatusTooManyRequests} {
+			synctestRun(t, func(ctx context.Context) {
+				var calls atomic.Int32
+
+				header := spentHeader(resource, time.Now().Add(10*time.Minute).Unix())
+				header.Set("Retry-After", "5")
+				client := fakeClient(t, limitedOnce(status, header, &calls))
+
+				waited, err := getWaited(ctx, t, client)
+				if err != nil || calls.Load() != 2 || waited < 9*time.Minute {
+					t.Fatalf("%s %d: err = %v, calls = %d, waited %v", resource, status, err, calls.Load(), waited)
+				}
+			})
+		}
+	}
+}
+
+func TestSpentNonCoreSecondaryBodyPausesCoreToo(t *testing.T) {
+	t.Parallel()
+
+	synctestRun(t, func(ctx context.Context) {
+		var calls atomic.Int32
+
+		reset := time.Now().Add(time.Minute).Unix()
+		client := fakeClient(t, func(req *http.Request) *http.Response {
+			if req.URL.Path == "/search" && calls.Add(1) == 1 {
+				res := reply(http.StatusForbidden, spentHeader("search", reset))
+				res.Body = io.NopCloser(strings.NewReader(`{"message":"You have exceeded a secondary rate limit."}`))
+
+				return res
+			}
+
+			return reply(http.StatusOK, http.Header{})
+		})
+
+		done := make(chan error, 1)
+
+		go func() {
+			_, err := client.Get(ctx, budget.Webhook, "/search")
+			done <- err
+		}()
+
+		synctest.Wait() // search is now in its backoff
+
+		start := time.Now()
+
+		_, err := client.Get(ctx, budget.Webhook, "/core")
+		if err != nil || time.Since(start) < 30*time.Second {
+			t.Fatalf("core request: err = %v, waited %v", err, time.Since(start))
+		}
+
+		searchErr := <-done
+		if searchErr != nil {
+			t.Fatal(searchErr)
+		}
+	})
+}
+
+func TestSpentNonCoreGivesUpWithoutWaitingAfterLastSend(t *testing.T) {
+	t.Parallel()
+
+	synctestRun(t, func(ctx context.Context) {
+		var calls atomic.Int32
+
+		client := fakeClient(t, func(*http.Request) *http.Response {
+			calls.Add(1)
+
+			return reply(http.StatusForbidden, spentHeader("search", time.Now().Add(30*time.Minute).Unix()))
+		})
+
+		waited, err := getWaited(ctx, t, client)
+		if !errors.Is(err, ghclient.ErrGaveUp) || calls.Load() != 4 || waited > 100*time.Minute {
+			t.Fatalf("err = %v, calls = %d, waited %v", err, calls.Load(), waited)
 		}
 	})
 }
