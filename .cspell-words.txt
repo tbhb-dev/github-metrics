@@ -206,3 +206,13 @@ readyz
 structurizr
 tsvg
 tpng
+cenkalti
+cespare
+collectorpb
+genproto
+logr
+metricspb
+otlpmetric
+otlpmetrichttp
+sdkmetric
+stdr
