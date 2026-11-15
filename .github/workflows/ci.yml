@@ -24,8 +24,7 @@ concurrency:
 
 jobs:
   # Bazel 9.x only, the version .bazelversion pins, on Linux x86_64 and
-  # arm64 only. The checks that need the network or GitHub's API run
-  # on Linux only; they do not depend on the OS.
+  # arm64 only.
   bazel:
     name: "bazel (${{ matrix.os }})"
     runs-on: ${{ matrix.os }}
@@ -38,8 +37,8 @@ jobs:
       run:
         shell: bash
     steps:
-      # Full history: the release build stamps the version through
-      # `git describe`.
+      # Full history lets tools/get_workspace_status.sh stamp the version
+      # through `git describe` for builds with --config=release.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
