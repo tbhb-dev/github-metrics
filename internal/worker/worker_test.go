@@ -5,11 +5,15 @@ package worker_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/store"
 	"github.com/tbhb-dev/github-metrics/internal/worker"
@@ -167,5 +171,143 @@ func TestPassDrainsBatches(t *testing.T) {
 	err := consumer.Pass(t.Context())
 	if err != nil || recorded != total || removed != total || reads != 3 {
 		t.Fatalf("Pass: %v, recorded = %d, removed = %d, reads = %d", err, recorded, removed, reads)
+	}
+}
+
+func TestStoreErrorStops(t *testing.T) {
+	t.Parallel()
+
+	errStore := store.ErrCorrupt
+
+	for _, operation := range []string{"pending", "remove"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Parallel()
+
+			var reads, records, removes int
+
+			queue := queueStub{
+				t:     t,
+				reads: 0,
+				pending: func(int) ([]store.Entry, error) {
+					reads++
+
+					if operation == "pending" {
+						return nil, errStore
+					}
+
+					return twoEntries(), nil
+				},
+				remove: func(uint64) error {
+					removes++
+
+					return errStore
+				},
+			}
+			consumer := worker.New(&queue, recorderFunc(func(_, _ string) { records++ }), slog.New(slog.DiscardHandler))
+
+			err := consumer.Run(t.Context(), time.Second)
+			want := 0
+
+			if operation == "remove" {
+				want = 1
+			}
+
+			if !errors.Is(err, errStore) || reads != 1 || records != want || removes != want {
+				t.Fatalf("Run: %v, reads = %d, records = %d, removes = %d", err, reads, records, removes)
+			}
+		})
+	}
+}
+
+func TestRunPollsAndCancelStops(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		var reads int
+
+		queue := queueStub{
+			t:     t,
+			reads: 0,
+			pending: func(int) ([]store.Entry, error) {
+				reads++
+
+				return nil, nil
+			},
+			remove: func(uint64) error {
+				t.Error("unexpected Remove")
+
+				return nil
+			},
+		}
+		consumer := worker.New(
+			&queue,
+			recorderFunc(func(_, _ string) { t.Error("unexpected record") }),
+			slog.New(slog.DiscardHandler),
+		)
+		done := make(chan error, 1)
+
+		go func() { done <- consumer.Run(ctx, time.Second) }()
+
+		synctest.Wait()
+
+		if reads != 1 {
+			t.Fatalf("startup reads = %d, want 1", reads)
+		}
+
+		time.Sleep(time.Second)
+		synctest.Wait()
+
+		if reads != 2 {
+			t.Fatalf("reads after poll = %d, want 2", reads)
+		}
+
+		cancel()
+
+		err := <-done
+		if err != nil || reads != 2 {
+			t.Fatalf("cancel: %v, reads = %d", err, reads)
+		}
+	})
+}
+
+func TestCancelDuringBatchStops(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	var records, removes int
+
+	queue := queueStub{
+		t:     t,
+		reads: 0,
+		pending: func(int) ([]store.Entry, error) {
+			return twoEntries(), nil
+		},
+		remove: func(uint64) error {
+			removes++
+
+			return nil
+		},
+	}
+	consumer := worker.New(
+		&queue,
+		recorderFunc(func(_, _ string) { records++; cancel() }),
+		slog.New(slog.DiscardHandler),
+	)
+
+	err := consumer.Pass(ctx)
+	if err != nil || records != 1 || removes != 1 {
+		t.Fatalf("cancel: %v, records = %d, removes = %d", err, records, removes)
+	}
+}
+
+func twoEntries() []store.Entry {
+	return []store.Entry{
+		{Delivery: "d1", Event: pullRequestEvent, Body: []byte(openedBody), Seq: 1},
+		{Delivery: "d2", Event: pullRequestEvent, Body: []byte(openedBody), Seq: 2},
 	}
 }
