@@ -211,12 +211,12 @@ func TestSpentCoreResetIsCappedAtOneHour(t *testing.T) {
 	}
 }
 
-// TestImplausibleResetIsInvalid covers resets too large to be real, which
-// time.Unix would wrap into the past, and a signed reset.
+// TestImplausibleResetIsInvalid covers a reset after 2100, a reset within the
+// first minute of 1970, and a signed one. None is a real reset.
 func TestImplausibleResetIsInvalid(t *testing.T) {
 	t.Parallel()
 
-	for _, reset := range []string{strconv.FormatInt(math.MaxInt64, 10), "99999999999", "+99"} {
+	for _, reset := range []string{strconv.FormatInt(math.MaxInt64, 10), "99999999999", "+99", "30", "59", "4102444801"} {
 		synctestRun(t, func(ctx context.Context) {
 			var calls atomic.Int32
 
@@ -232,6 +232,47 @@ func TestImplausibleResetIsInvalid(t *testing.T) {
 	}
 }
 
+// TestResetBoundsAreValid covers the first value each bound accepts.
+func TestResetBoundsAreValid(t *testing.T) {
+	t.Parallel()
+
+	for _, reset := range []string{"60", "4102444800"} {
+		synctestRun(t, func(ctx context.Context) {
+			var calls atomic.Int32
+
+			header := spentHeader("search", 0)
+			header.Set("X-Ratelimit-Reset", reset)
+			client := fakeClient(t, limitedOnce(http.StatusForbidden, header, &calls))
+
+			_, err := getWaited(ctx, t, client)
+			if err != nil || calls.Load() != 2 {
+				t.Fatalf("reset %q: err = %v, calls = %d", reset, err, calls.Load())
+			}
+		})
+	}
+}
+
+func TestSpentCoreImplausibleResetBacksOffBriefly(t *testing.T) {
+	t.Parallel()
+
+	for _, reset := range []string{strconv.FormatInt(math.MinInt64, 10), "30", "99999999999"} {
+		synctestRun(t, func(ctx context.Context) {
+			var calls atomic.Int32
+
+			header := spentHeader(budget.CoreResource, 0)
+			header.Set("X-Ratelimit-Reset", reset)
+			client := fakeClient(t, limitedOnce(http.StatusForbidden, header, &calls))
+
+			waited, err := getWaited(ctx, t, client)
+			if err != nil || calls.Load() != 2 || waited < time.Minute || waited > 2*time.Minute {
+				t.Fatalf("reset %q: err = %v, calls = %d, waited %v", reset, err, calls.Load(), waited)
+			}
+		})
+	}
+}
+
+// This test pins the give-up path for a missing or non-numeric reset. It
+// passed before the past-reset retry too, so it doesn't prove that fix.
 func TestSpentNonCoreWithoutUsableResetGivesUpAfterOneSend(t *testing.T) {
 	t.Parallel()
 

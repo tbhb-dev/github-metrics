@@ -36,8 +36,10 @@ const (
 	// already past. It covers only a few seconds of clock skew or a reset
 	// truncated to the second, not larger skew.
 	pastResetWait = 3 * time.Second
-	// maxResetUnix bounds a plausible `x-ratelimit-reset`, the start of 2100.
-	// A larger value is invalid, since time.Unix would wrap it into the past.
+	// minResetUnix and maxResetUnix bound a plausible `x-ratelimit-reset`: one
+	// minute after the epoch, and the start of 2100. A value outside them is
+	// invalid, not clamped, because no real reset is that early or that late.
+	minResetUnix = 60
 	maxResetUnix = 4102444800
 
 	// bodyProbe is how much of a 403 body is searched for a secondary limit.
@@ -429,12 +431,12 @@ func (c *Client) primaryBackoff(ctx context.Context, got *reply, last bool) erro
 
 // resetUnix parses `x-ratelimit-reset` as Unix seconds. It refuses a value
 // that's absent, not a plain integer (a leading plus sign too, as in
-// the `retry-after` parse), not positive, or past maxResetUnix.
+// the `retry-after` parse), before minResetUnix, or past maxResetUnix.
 func resetUnix(header http.Header) (int64, bool) {
 	value := strings.TrimSpace(header.Get("X-Ratelimit-Reset"))
 
 	reset, err := strconv.ParseInt(value, 10, 64)
-	if err != nil || strings.HasPrefix(value, "+") || reset <= 0 || reset > maxResetUnix {
+	if err != nil || strings.HasPrefix(value, "+") || reset < minResetUnix || reset > maxResetUnix {
 		return 0, false
 	}
 
