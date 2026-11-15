@@ -8,6 +8,7 @@
     "bazel-*/**/*",
     ".bazel-*/**/*",
     "coverage.xml",
+    "docs/architecture/diagrams/**/*",
     "go.sum",
     "LICENSE",
     "MODULE.bazel.lock",
