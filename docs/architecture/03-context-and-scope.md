@@ -2,7 +2,7 @@
 
 > Today versus design: the code has a webhook receiver and a GitHub client behind one request budget. The worker, the reconciler, the store, and the export remain design. This page shows the rest as design.
 
-Expected diagram, not yet generated: `diagrams/structurizr-SystemContext.svg`, from `workspace.dsl`.
+![System context of github-metrics: GitHub delivers webhooks, and the service reads the REST API and exports to the host collector](diagrams/structurizr-SystemContext.svg)
 
 ## Business context
 
