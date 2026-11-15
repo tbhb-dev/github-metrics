@@ -33,7 +33,7 @@ func open(t *testing.T, path string) *store.Bolt {
 func enqueue(t *testing.T, repo store.Store, delivery, body string) store.Outcome {
 	t.Helper()
 
-	outcome, err := repo.Enqueue(delivery, []byte(body))
+	outcome, err := repo.Enqueue(delivery, "pull_request", []byte(body))
 	if err != nil {
 		t.Fatalf("Enqueue(%q): %v", delivery, err)
 	}
@@ -55,14 +55,23 @@ func pending(t *testing.T, repo store.Store) []store.Entry {
 func TestEnqueueThenPending(t *testing.T) {
 	t.Parallel()
 
-	repo := open(t, filepath.Join(t.TempDir(), "store.db"))
+	path := filepath.Join(t.TempDir(), "store.db")
+	repo := open(t, path)
 
 	if got := enqueue(t, repo, "d1", `{"a":1}`); got != store.Enqueued {
 		t.Fatalf("outcome = %v, want Enqueued", got)
 	}
 
+	err := repo.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo = open(t, path)
 	entries := pending(t, repo)
-	if len(entries) != 1 || entries[0].Delivery != "d1" || string(entries[0].Body) != `{"a":1}` {
+
+	if len(entries) != 1 || entries[0].Delivery != "d1" || entries[0].Event != "pull_request" ||
+		string(entries[0].Body) != `{"a":1}` {
 		t.Fatalf("pending = %+v", entries)
 	}
 }
@@ -99,7 +108,7 @@ func TestReusedIDWithDifferentBody(t *testing.T) {
 	repo := open(t, filepath.Join(t.TempDir(), "store.db"))
 	enqueue(t, repo, "d1", "first")
 
-	outcome, err := repo.Enqueue("d1", []byte("second"))
+	outcome, err := repo.Enqueue("d1", "pull_request", []byte("second"))
 
 	if outcome != 0 {
 		t.Fatalf("outcome = %v, want 0", outcome)
@@ -197,7 +206,7 @@ func TestFailedWriteLeavesStoreUnchanged(t *testing.T) {
 	// already written in the same transaction, so this fails mid-write.
 	huge := strings.Repeat("x", 40000)
 
-	_, err := repo.Enqueue(huge, []byte("lost"))
+	_, err := repo.Enqueue(huge, "pull_request", []byte("lost"))
 	if !errors.Is(err, boltErrors.ErrKeyTooLarge) {
 		t.Fatalf("Enqueue error = %v, want ErrKeyTooLarge", err)
 	}
@@ -218,7 +227,7 @@ func TestEmptyDeliveryID(t *testing.T) {
 
 	repo := open(t, filepath.Join(t.TempDir(), "store.db"))
 
-	outcome, err := repo.Enqueue("", []byte("body"))
+	outcome, err := repo.Enqueue("", "pull_request", []byte("body"))
 
 	if outcome != 0 {
 		t.Fatalf("outcome = %v, want 0", outcome)
@@ -389,7 +398,7 @@ func TestClosedStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	outcome, err := repo.Enqueue("d1", []byte("body"))
+	outcome, err := repo.Enqueue("d1", "pull_request", []byte("body"))
 	if outcome != 0 || !errors.Is(err, boltErrors.ErrDatabaseNotOpen) {
 		t.Fatalf("Enqueue = %v, %v", outcome, err)
 	}
