@@ -110,7 +110,7 @@ Next, the service exchanges the JWT for an installation token that expires after
 
 In memory only, the service keeps the token until less than 5 minutes remain, and then renews it. Neither disk nor a log ever receives the token.
 
-Plan step 6 of the design, a threat-model follow-up, covers retiring a previous webhook secret. It also covers rotating the App's private key.
+Plan step 6 on [page 11](11-risks-and-technical-debt.md), a threat-model follow-up, covers retiring a previous webhook secret. It also covers rotating the App's private key.
 
 ## Related pages
 

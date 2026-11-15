@@ -41,7 +41,7 @@ The design sizes its request budget from these figures. The budget in `internal/
 | List endpoints return at most 100 items a page | Existing, re-read 2026-11-13 | Pull request endpoints, `per_page` |
 | The PR commits endpoint returns at most 250 commits | Existing, re-read 2026-11-13 | Pull request endpoints |
 | About a third of per-PR lists need a second page | Unverified | An assumption for the budget, and the design's first run would measure it |
-| `ETag` values remain valid across the hourly token rotation | Unverified | The first live run after plan step 7 of the design would measure the `304` rate |
+| `ETag` values remain valid across the hourly token rotation | Unverified | The first live run after plan step 7 on [page 11](11-risks-and-technical-debt.md) would measure the `304` rate |
 
 ## Webhook delivery and payload limits
 
@@ -66,7 +66,7 @@ The receiver exists today. The design plans the rest of its delivery handling.
 | The PR files endpoint is under Pull requests read | Existing, re-read 2026-11-13 | Permissions required for GitHub Apps |
 | The issue timeline endpoint accepts either Issues read or Pull requests read | Existing | Permissions required for GitHub Apps |
 | The manifest keys are `default_permissions` and `default_events` | Existing | Registering an App from a manifest |
-| The permission keys are `pull_requests` and `metadata` | New | GitHub App endpoints, "Create an installation access token for an app." Its `permissions` body uses these names. The manifest flow in plan step 7 of the design hasn't run yet, so it doesn't confirm them |
+| The permission keys are `pull_requests` and `metadata` | New | GitHub App endpoints, "Create an installation access token for an app." Its `permissions` body uses these names. The manifest flow in plan step 7 on [page 11](11-risks-and-technical-debt.md) hasn't run yet, so it doesn't confirm them |
 
 ## Payload content and timeline events
 
@@ -89,7 +89,7 @@ The receiver exists today. The design plans the rest of its delivery handling.
 
 | Claim | Label | Source |
 | --- | --- | --- |
-| `bbolt` doesn't zero freed pages, so logically deleted bodies can remain in the file | Unverified | Plan step 6 of the design covers file modes and backups |
+| `bbolt` doesn't zero freed pages, so logically deleted bodies can remain in the file | Unverified | Plan step 6 on [page 11](11-risks-and-technical-debt.md) covers file modes and backups |
 
 ## Telemetry libraries and backends
 
@@ -99,9 +99,9 @@ This section concerns the planned export path. The code has no OpenTelemetry (OT
 | --- | --- | --- |
 | OTel treats an all-zero trace or span ID as invalid | Existing | W3C Trace Context and the OTel trace API specification |
 | The Go SDK accepts explicit start and end timestamps on spans | Existing, not re-read for this draft | OTel Go `trace.WithTimestamp` option |
-| A custom ID generator in the Go SDK can return the derived IDs | Unverified | Plan step 2 of the design |
+| A custom ID generator in the Go SDK can return the derived IDs | Unverified | Plan step 2 on [page 11](11-risks-and-technical-debt.md) |
 | The `vcs.*` attribute names match the current semantic conventions | Unverified | The conventions are in development, and step 3 pins a version |
-| The backend shows and searches spans dated weeks in the past | Unverified | Plan step 2 of the design |
+| The backend shows and searches spans dated weeks in the past | Unverified | Plan step 2 on [page 11](11-risks-and-technical-debt.md) |
 | Backends keep or drop a second span with an already-exported ID | Unverified | Nobody has tested it, and the design avoids re-exporting the root |
 | The host collector accepts OTel Protocol (OTLP) over HTTP on port 4318 | Unverified | Port 4318 is the OTLP default, and step 2 confirms it on the host |
 | Who can read the backends, and how long they keep this telemetry | Unverified | The operator confirms it in the threat-model follow-up, plan step 6 |
