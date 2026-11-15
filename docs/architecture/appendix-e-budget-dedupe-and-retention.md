@@ -1,6 +1,6 @@
 # Appendix E: budget, dedupe, and retention
 
-Today the repository has a webhook receiver, a request budget, and a GitHub client. Everything else on this page is design or planned, and every figure is an estimate until the first run measures it.
+Today the repository has a webhook receiver, a request budget, and a GitHub client. Everything else on this page is design or planned, and every estimate here is unmeasured until the first run.
 
 This page moves details that pages 6, 7, and 8 only summarize out of the wiki design, which is the `drafts/github-metrics` folder in the `tbhb-dev/wiki` repository. Section "Request budget" comes from appendix D of that design, and the other sections come from its webhook security, data, and failure handling sections.
 
@@ -17,7 +17,7 @@ List endpoints return at most 100 items a page. Each per-PR fetch of reviews, co
 | Webhook reconciles, about 30 PRs an hour: the PR, then reviews, commits, and timeline | 5 each | 150 |
 | Total steady state | | 450, about 9% of 5,000 |
 
-The nightly sweep adds about 400 requests for 100 open PRs. Most return `304`, and GitHub doesn't count a conditional request that returns `304` against the primary limit (existing, per the design). The real cost is well below the worst case. Whether `ETag` values change at each hourly token rotation is unverified, and the worst-case figures assume they do.
+The nightly sweep adds about 400 requests for 100 open PRs. Most return `304`, and GitHub doesn't count a conditional request that returns `304` against the primary limit when it includes an `Authorization` header (existing, per appendix C). The real cost is far lower. Whether `ETag` values change at each hourly token rotation is unverified, and the worst-case figures assume they do.
 
 ### Shared bucket
 
@@ -54,7 +54,7 @@ Today `main` has none of the table rules. It checks that both headers match fixe
 
 In the design, a webhook secret rotation accepts a signature made with the current or the previous secret. The App private key and the webhook secret come from 1Password through the deploy host's secret manager, mounted as read-only files. Neither is in the image or the environment.
 
-Routing is simpler. The tunnel routes only the `/webhook` path for the hostname, and the edge answers `404` to any other path. A second listener serves health checks, and the tunnel doesn't route it. Page 7 shows the deployment, and nobody has verified the route from this repository.
+Routing exists only in the design. The tunnel routes only the `/webhook` path for the hostname, and the edge answers `404` to any other path. A second listener serves health checks, and the tunnel doesn't route it. Today `main` serves `/healthz` and `/webhook` from one handler, and page 7 doesn't show a second listener. Nobody has verified the route from this repository.
 
 ## Data kept
 
