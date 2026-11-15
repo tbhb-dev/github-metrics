@@ -35,6 +35,6 @@ Step 1 finished. Steps 2 to 8 remain open work. Today `main` has the receiver, t
 | 5 | The reconciler, the shared request budget, and the backfill | A test against recorded responses shows a full run under its request budget and pacing | Platform engineering |
 | 6 | A threat-model follow-up design covers the receiver gaps, the tunnel acceptance gates, secret and store file modes, store backup and corruption, secret retirement and key rotation, and backend access and retention | That design merges with each gate specified, and the operator confirms the backend input | Platform engineering |
 | 7 | The App from its manifest, the secrets in 1Password, the published image and Compose file, and the host operator's deployment with the tunnel | Step 6 has merged, a test delivery from the App's settings page returns `202`, and a `GET` on any path returns `404` | Platform engineering and the host operator |
-| 8 | A dashboard of the three histograms | The dashboard shows each repository's percentiles from live data | Platform engineering |
+| 8 | Mimir recording rules and a Grafana dashboard for the direct metrics, including the created-to-merged goal and the cycle time, which replace the scripted timing table | The dashboard shows each repository's 24-hour median and p95, and the goal flag, from live data | Platform engineering |
 
 The first deploy, step 7, waits on step 6.
