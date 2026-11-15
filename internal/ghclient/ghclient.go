@@ -181,14 +181,9 @@ func (c *Client) Get(ctx context.Context, priority budget.Priority, target strin
 	renewed := false
 
 	for range maxAttempts {
-		waitErr := c.budget.Wait(ctx, priority)
-		if waitErr != nil {
-			return nil, fmt.Errorf("get %s: %w", full.Path, waitErr)
-		}
-
-		token, tokenErr := c.token(ctx, renew)
-		if tokenErr != nil {
-			return nil, tokenErr
+		token, readyErr := c.ready(ctx, priority, full.Path, renew)
+		if readyErr != nil {
+			return nil, readyErr
 		}
 
 		renewed = renewed || renew
@@ -208,16 +203,29 @@ func (c *Client) Get(ctx context.Context, priority budget.Priority, target strin
 			return c.response(full.String(), got), nil
 		case got.status == http.StatusUnauthorized && !renewed:
 			renew = true
+		case isPrimaryLimit(got):
+			pauseErr := c.primaryBackoff(ctx, got.header)
+			if pauseErr != nil {
+				return nil, fmt.Errorf("get %s: %w", full.Path, pauseErr)
+			}
 		case isSecondaryLimit(got):
 			c.budget.Backoff(retryAfter(got.header))
-		case isPrimaryLimit(got):
-			c.budget.Backoff(untilReset(got.header))
 		default:
 			return nil, &StatusError{Path: full.Path, Status: got.status}
 		}
 	}
 
 	return nil, fmt.Errorf("get %s: %w", full.Path, ErrGaveUp)
+}
+
+// ready waits for a budget slot and returns the token for one send.
+func (c *Client) ready(ctx context.Context, priority budget.Priority, path string, renew bool) (string, error) {
+	waitErr := c.budget.Wait(ctx, priority)
+	if waitErr != nil {
+		return "", fmt.Errorf("get %s: %w", path, waitErr)
+	}
+
+	return c.token(ctx, renew)
 }
 
 // reply is what one send received.
@@ -325,7 +333,8 @@ func (c *Client) response(key string, got *reply) *Response {
 }
 
 // isSecondaryLimit matches a 429, and a 403 that mentions a secondary limit or
-// has a `retry-after` header.
+// has a `retry-after` header. isPrimaryLimit takes a response first, so a 429
+// with zero requests left isn't secondary.
 func isSecondaryLimit(got *reply) bool {
 	if got.status == http.StatusTooManyRequests {
 		return true
@@ -340,11 +349,43 @@ func isSecondaryLimit(got *reply) bool {
 	return got.header.Get("Retry-After") != "" || strings.Contains(probe, "secondary rate limit")
 }
 
-// isPrimaryLimit matches a 403 whose `x-ratelimit-remaining` is zero: the
-// primary budget of the response's resource is spent.
+// isPrimaryLimit matches a 403 or 429 whose `x-ratelimit-remaining` is zero
+// and that has no `retry-after` header: the primary budget of the response's
+// resource is spent.
 func isPrimaryLimit(got *reply) bool {
-	return got.status == http.StatusForbidden &&
-		strings.TrimSpace(got.header.Get("X-Ratelimit-Remaining")) == "0"
+	return (got.status == http.StatusForbidden || got.status == http.StatusTooManyRequests) &&
+		strings.TrimSpace(got.header.Get("X-Ratelimit-Remaining")) == "0" &&
+		got.header.Get("Retry-After") == ""
+}
+
+// primaryBackoff waits out a spent primary budget. The core budget stops the
+// shared limiter until its reset. Another resource, such as search or
+// GraphQL, pauses only this request until that resource's own reset, so core
+// callers keep running. It returns ErrGaveUp for another resource whose reset
+// is missing, invalid or past, because a retry would fail the same way.
+func (c *Client) primaryBackoff(ctx context.Context, header http.Header) error {
+	resource := header.Get("X-Ratelimit-Resource")
+	wait := untilReset(header)
+
+	if resource == "" || resource == budget.CoreResource {
+		c.budget.Backoff(wait)
+
+		return nil
+	}
+
+	if wait <= 0 {
+		return ErrGaveUp
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait for reset: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 // untilReset returns the time to the `x-ratelimit-reset` of a response,
@@ -365,7 +406,7 @@ func retryAfter(header http.Header) time.Duration {
 	value := strings.TrimSpace(header.Get("Retry-After"))
 
 	seconds, err := strconv.ParseInt(value, 10, 64)
-	if err == nil {
+	if err == nil && !strings.HasPrefix(value, "+") {
 		if seconds <= 0 {
 			return 0
 		}
