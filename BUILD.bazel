@@ -128,7 +128,7 @@ go_mod_tidy_test(
     proxy = "@go_mod_proxy//:proxy",
 )
 
-# PR runs report survivors without failing.
+# Run by hand; the scheduled run uses store_mutation_nightly_test.
 gomutants_test(
     name = "store_mutation_test",
     advisory = True,
@@ -136,6 +136,7 @@ gomutants_test(
     go_mod = "go.mod",
     go_sum = "go.sum",
     proxy = "@go_mod_proxy//:proxy",
+    tags = ["manual"],
     tests = ["//internal/store:store_test"],
 )
 
