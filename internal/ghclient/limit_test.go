@@ -241,6 +241,7 @@ func TestResetBoundsAreValid(t *testing.T) {
 		reset           string
 		atLeast, atMost time.Duration
 	}{
+		// The 3 seconds are pastResetWait, the wait for a reset that's already past.
 		{"60", 3 * time.Second, 3 * time.Second},
 		{"4102444800", 59 * time.Minute, time.Hour + time.Minute},
 	} {
