@@ -39,7 +39,7 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
-    mem_limit: 64m
+    mem_limit: 256m
     cpus: 0.5
     pids_limit: 128
     restart: unless-stopped
