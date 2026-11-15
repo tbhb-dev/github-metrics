@@ -505,3 +505,88 @@ func statusClient(t *testing.T, status int) *ghclient.Client {
 
 	return client
 }
+
+func TestPrimaryLimitWaitsForResetThenRetries(t *testing.T) {
+	t.Parallel()
+
+	synctestRun(t, func(ctx context.Context) {
+		var calls atomic.Int32
+
+		reset := time.Unix(time.Now().Add(10*time.Minute).Unix(), 0)
+
+		client := fakeClient(t, func(*http.Request) *http.Response {
+			if calls.Add(1) == 1 {
+				header := http.Header{}
+				header.Set("X-Ratelimit-Resource", budget.CoreResource)
+				header.Set("X-Ratelimit-Remaining", "0")
+				header.Set("X-Ratelimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+
+				return reply(http.StatusForbidden, header)
+			}
+
+			return reply(http.StatusOK, http.Header{})
+		})
+
+		_, err := client.Get(ctx, budget.Webhook, "/x")
+		if err != nil || calls.Load() != 2 {
+			t.Fatalf("err = %v, calls = %d", err, calls.Load())
+		}
+
+		if time.Now().Before(reset) {
+			t.Fatalf("retry ran at %v, before the reset %v", time.Now(), reset)
+		}
+	})
+}
+
+func TestOtherResourceDoesNotStopWork(t *testing.T) {
+	t.Parallel()
+
+	synctestRun(t, func(ctx context.Context) {
+		reset := time.Now().Add(30 * time.Minute)
+
+		client := fakeClient(t, func(*http.Request) *http.Response {
+			header := http.Header{}
+			header.Set("X-Ratelimit-Resource", "search")
+			header.Set("X-Ratelimit-Remaining", "5")
+			header.Set("X-Ratelimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+
+			return reply(http.StatusOK, header)
+		})
+
+		for range 2 {
+			_, err := client.Get(ctx, budget.Webhook, "/x")
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		if waited := time.Until(reset); waited < 29*time.Minute {
+			t.Fatalf("second request waited for another resource's reset, %v left", waited)
+		}
+	})
+}
+
+func TestServerErrorFailsWithoutRetry(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+
+	client, _ := newClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}, newTokens())
+
+	_, err := client.Get(t.Context(), budget.Webhook, "/x")
+	if got := statusOf(err); got != http.StatusBadGateway || calls.Load() != 1 {
+		t.Fatalf("status = %d, calls = %d, err = %v", got, calls.Load(), err)
+	}
+}
+
+// statusOf returns the HTTP status code that err holds, or 0 when err has none.
+func statusOf(err error) int {
+	if status, ok := errors.AsType[*ghclient.StatusError](err); ok {
+		return status.Status
+	}
+
+	return 0
+}

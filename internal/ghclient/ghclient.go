@@ -168,8 +168,9 @@ func New(
 // URL of an earlier response. A new `ETag` is stored on receipt, so a caller
 // that can't use a 200 body gets only a 304 on the next call and must clear
 // the tag first. A redirect returns a status error. It waits for a budget slot at the given
-// priority. A 401 renews the token once. A secondary rate limit response
-// backs the budget off and retries, up to four sends in all.
+// priority. A 401 renews the token once. A secondary rate limit response, or
+// a 403 with no primary budget left, backs the budget off and retries, up to
+// four sends in all.
 func (c *Client) Get(ctx context.Context, priority budget.Priority, target string) (*Response, error) {
 	full, err := c.resolve(target)
 	if err != nil {
@@ -209,6 +210,8 @@ func (c *Client) Get(ctx context.Context, priority budget.Priority, target strin
 			renew = true
 		case isSecondaryLimit(got):
 			c.budget.Backoff(retryAfter(got.header))
+		case isPrimaryLimit(got):
+			c.budget.Backoff(untilReset(got.header))
 		default:
 			return nil, &StatusError{Path: full.Path, Status: got.status}
 		}
@@ -304,7 +307,7 @@ func (c *Client) observe(header http.Header) {
 		return
 	}
 
-	c.budget.Observe(remaining, time.Unix(reset, 0))
+	c.budget.Observe(header.Get("X-Ratelimit-Resource"), remaining, time.Unix(reset, 0))
 }
 
 // response builds the result of a 200 or 304 and stores a new `ETag`.
@@ -335,6 +338,25 @@ func isSecondaryLimit(got *reply) bool {
 	probe := strings.ToLower(string(got.body[:min(len(got.body), bodyProbe)]))
 
 	return got.header.Get("Retry-After") != "" || strings.Contains(probe, "secondary rate limit")
+}
+
+// isPrimaryLimit matches a 403 whose `x-ratelimit-remaining` is zero: the
+// primary budget of the response's resource is spent.
+func isPrimaryLimit(got *reply) bool {
+	return got.status == http.StatusForbidden &&
+		strings.TrimSpace(got.header.Get("X-Ratelimit-Remaining")) == "0"
+}
+
+// untilReset returns the time to the `x-ratelimit-reset` of a response,
+// clamped to the budget's reset cap. It's zero when the header is absent,
+// invalid or past, which leaves the wait to the budget's doubling backoff.
+func untilReset(header http.Header) time.Duration {
+	reset, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-Ratelimit-Reset")), 10, 64)
+	if err != nil {
+		return 0
+	}
+
+	return min(max(time.Until(time.Unix(reset, 0)), 0), budget.MaxReset)
 }
 
 // retryAfter returns the `retry-after` wait, as seconds or an HTTP date,
