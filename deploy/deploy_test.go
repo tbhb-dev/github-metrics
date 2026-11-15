@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -46,10 +45,6 @@ func runUp(t *testing.T, args ...string) result {
 // far as running Compose.
 func runIn(t *testing.T, shell string, args ...string) result {
 	t.Helper()
-
-	if runtime.GOOS == "windows" {
-		t.Skip("the script needs a POSIX shell")
-	}
 
 	dir := t.TempDir()
 	record := filepath.Join(dir, "record")
