@@ -19,6 +19,7 @@ cachehttp
 cacheinfo
 cand
 capsys
+cgo
 cicd
 cmdlines
 cocogitto
