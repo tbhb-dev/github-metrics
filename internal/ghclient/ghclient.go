@@ -180,7 +180,7 @@ func (c *Client) Get(ctx context.Context, priority budget.Priority, target strin
 	renew := false
 	renewed := false
 
-	for range maxAttempts {
+	for attempt := range maxAttempts {
 		token, readyErr := c.ready(ctx, priority, full.Path, renew)
 		if readyErr != nil {
 			return nil, readyErr
@@ -204,7 +204,7 @@ func (c *Client) Get(ctx context.Context, priority budget.Priority, target strin
 		case got.status == http.StatusUnauthorized && !renewed:
 			renew = true
 		case isPrimaryLimit(got):
-			pauseErr := c.primaryBackoff(ctx, got.header)
+			pauseErr := c.primaryBackoff(ctx, got, attempt == maxAttempts-1)
 			if pauseErr != nil {
 				return nil, fmt.Errorf("get %s: %w", full.Path, pauseErr)
 			}
@@ -344,28 +344,35 @@ func isSecondaryLimit(got *reply) bool {
 		return false
 	}
 
+	return namesSecondary(got)
+}
+
+// isPrimaryLimit matches a 403 or 429 whose `x-ratelimit-remaining` is zero:
+// the primary budget of the response's resource is spent. A `retry-after`
+// header doesn't change that. The wait covers both.
+func isPrimaryLimit(got *reply) bool {
+	return (got.status == http.StatusForbidden || got.status == http.StatusTooManyRequests) &&
+		strings.TrimSpace(got.header.Get("X-Ratelimit-Remaining")) == "0"
+}
+
+// namesSecondary is true when a response has a `retry-after` header or a body
+// that mentions a secondary limit.
+func namesSecondary(got *reply) bool {
 	probe := strings.ToLower(string(got.body[:min(len(got.body), bodyProbe)]))
 
 	return got.header.Get("Retry-After") != "" || strings.Contains(probe, "secondary rate limit")
 }
 
-// isPrimaryLimit matches a 403 or 429 whose `x-ratelimit-remaining` is zero
-// and that has no `retry-after` header: the primary budget of the response's
-// resource is spent.
-func isPrimaryLimit(got *reply) bool {
-	return (got.status == http.StatusForbidden || got.status == http.StatusTooManyRequests) &&
-		strings.TrimSpace(got.header.Get("X-Ratelimit-Remaining")) == "0" &&
-		got.header.Get("Retry-After") == ""
-}
-
-// primaryBackoff waits out a spent primary budget. The core budget stops the
-// shared limiter until its reset. Another resource, such as search or
-// GraphQL, pauses only this request until that resource's own reset, so core
-// callers keep running. It returns ErrGaveUp for another resource whose reset
-// is missing, invalid or past, because a retry would fail the same way.
-func (c *Client) primaryBackoff(ctx context.Context, header http.Header) error {
-	resource := header.Get("X-Ratelimit-Resource")
-	wait := untilReset(header)
+// primaryBackoff waits out a spent primary budget for the longer of the
+// `retry-after` and the reset. The core budget stops the shared limiter for
+// that time. Another resource, such as search or GraphQL, pauses only this
+// request, so core callers keep running, unless the response is also
+// secondary, which pauses the shared limiter too. It returns ErrGaveUp
+// for another resource with no wait to serve, because a retry would fail the
+// same way. On the last attempt it skips the own wait, since no send is left.
+func (c *Client) primaryBackoff(ctx context.Context, got *reply, last bool) error {
+	resource := got.header.Get("X-Ratelimit-Resource")
+	wait := max(untilReset(got.header), retryAfter(got.header))
 
 	if resource == "" || resource == budget.CoreResource {
 		c.budget.Backoff(wait)
@@ -373,8 +380,16 @@ func (c *Client) primaryBackoff(ctx context.Context, header http.Header) error {
 		return nil
 	}
 
+	if namesSecondary(got) {
+		c.budget.Backoff(retryAfter(got.header))
+	}
+
 	if wait <= 0 {
 		return ErrGaveUp
+	}
+
+	if last {
+		return nil
 	}
 
 	timer := time.NewTimer(wait)
