@@ -1,0 +1,224 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Tony Burns
+
+package worker_test
+
+import (
+	"bytes"
+	"fmt"
+	"log/slog"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/tbhb-dev/github-metrics/internal/store"
+	"github.com/tbhb-dev/github-metrics/internal/worker"
+)
+
+const (
+	maxQueueReads, batchSize = 10, 100
+	removeFirst              = "remove 1"
+	pullRequestEvent         = "pull_request"
+	openedBody               = `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"opened"}`
+)
+
+type queueStub struct {
+	t       *testing.T
+	pending func(int) ([]store.Entry, error)
+	remove  func(uint64) error
+	reads   int
+}
+
+func (q *queueStub) Pending(limit int) ([]store.Entry, error) {
+	q.t.Helper()
+	q.reads++
+
+	// Bound broken drain loops during mutation checks.
+	if q.reads > maxQueueReads {
+		q.t.Fatal("worker kept reading the queue")
+	}
+
+	return q.pending(limit)
+}
+
+func (q *queueStub) Remove(seq uint64) error { return q.remove(seq) }
+
+type recorderFunc func(string, string) error
+
+func (f recorderFunc) RecordPullRequest(repo, action string) error { return f(repo, action) }
+
+func TestParse(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name, body, repository, action string
+		bad                            bool
+	}{
+		{"opened", openedBody, "tbhb-dev/github-metrics", "opened", false},
+		{
+			"closed with unused fields",
+			`{"action":"closed","repository":{"full_name":"tbhb-dev/wiki","id":1},"pull_request":{"number":2}}`,
+			"tbhb-dev/wiki", "closed", false,
+		},
+		{"bad JSON", `{"action":`, "", "", true},
+		{"bad action type", `{"action":1}`, "", "", true},
+		{"bad repository type", `{"repository":{"full_name":1}}`, "", "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			repository, action, err := worker.Parse([]byte(test.body))
+			if (err != nil) != test.bad || repository != test.repository || action != test.action {
+				t.Fatalf("parse = %q, %q, %v", repository, action, err)
+			}
+		})
+	}
+}
+
+func TestPass(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name, event, body, log string
+		want                   []string
+	}{
+		{
+			"record before remove", pullRequestEvent, openedBody, "",
+			[]string{"record tbhb-dev/github-metrics opened", removeFirst},
+		},
+		{"bad body removed", pullRequestEvent, `{"action":`, "bad pull request body", []string{removeFirst}},
+		{"other event removed", "ping", openedBody, "discarded event", []string{removeFirst}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var calls []string
+
+			var logs bytes.Buffer
+
+			entries := []store.Entry{{Delivery: "d1", Event: test.event, Body: []byte(test.body), Seq: 1}}
+			queue := queueStub{
+				t:       t,
+				reads:   0,
+				pending: func(int) ([]store.Entry, error) { return entries, nil },
+				remove: func(seq uint64) error {
+					calls = append(calls, fmt.Sprintf("remove %d", seq))
+					entries = nil
+
+					return nil
+				},
+			}
+			recorder := recorderFunc(func(repository, action string) error {
+				calls = append(calls, "record "+repository+" "+action)
+
+				return nil
+			})
+
+			err := worker.New(&queue, recorder, slog.New(slog.NewTextHandler(&logs, nil))).Pass(t.Context())
+			if err != nil || !reflect.DeepEqual(calls, test.want) || !strings.Contains(logs.String(), test.log) {
+				t.Fatalf("Pass: %v, calls = %v, logs = %q", err, calls, logs.String())
+			}
+		})
+	}
+}
+
+func TestPassDrainsBatches(t *testing.T) {
+	t.Parallel()
+
+	const total = batchSize + 1
+
+	var removed, recorded uint64
+
+	queue := queueStub{
+		t:     t,
+		reads: 0,
+		pending: func(limit int) ([]store.Entry, error) {
+			if limit != batchSize {
+				t.Fatalf("limit = %d, want %d", limit, batchSize)
+			}
+
+			var entries []store.Entry
+
+			for seq := removed + 1; seq <= total && len(entries) < limit; seq++ {
+				entries = append(entries, store.Entry{
+					Delivery: "d1", Event: pullRequestEvent, Body: []byte(openedBody), Seq: seq,
+				})
+			}
+
+			return entries, nil
+		},
+		remove: func(seq uint64) error {
+			removed++
+
+			if seq != removed || recorded != removed {
+				t.Fatalf("Remove(%d): removed = %d, recorded = %d", seq, removed, recorded)
+			}
+
+			return nil
+		},
+	}
+	consumer := worker.New(&queue, recorderFunc(func(_, _ string) error {
+		recorded++
+
+		return nil
+	}), slog.New(slog.DiscardHandler))
+
+	err := consumer.Pass(t.Context())
+	if err != nil || recorded != total || removed != total || queue.reads != 3 {
+		t.Fatalf("Pass: %v, recorded = %d, removed = %d, reads = %d", err, recorded, removed, queue.reads)
+	}
+}
+
+func TestPassRecorderRetry(t *testing.T) {
+	t.Parallel()
+
+	for _, passes := range []int{1, 2} {
+		t.Run(fmt.Sprintf("passes %d", passes), func(t *testing.T) {
+			t.Parallel()
+
+			testRecorderRetry(t, passes)
+		})
+	}
+}
+
+func testRecorderRetry(t *testing.T, passes int) {
+	t.Helper()
+
+	queue, err := store.Open(filepath.Join(t.TempDir(), "queue.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = queue.Close() })
+
+	for _, body := range []string{openedBody, openedBody + " "} {
+		_, err = queue.Enqueue(body, pullRequestEvent, []byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var records int
+
+	recordErr := store.ErrCorrupt
+	consumer := worker.New(queue, recorderFunc(func(_, _ string) error {
+		records++
+
+		return recordErr
+	}), slog.New(slog.DiscardHandler))
+
+	for range passes {
+		err = consumer.Pass(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		recordErr = nil
+	}
+
+	entries, err := queue.Pending(batchSize)
+	if err != nil || len(entries) != 2*(2-passes) || records != 2*passes-1 {
+		t.Fatalf("pending: %v, entries = %v, records = %d", err, entries, records)
+	}
+}
