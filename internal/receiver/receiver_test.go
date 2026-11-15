@@ -20,13 +20,14 @@ import (
 )
 
 const (
-	sigHeader      = "X-Hub-Signature-256"
-	deliveryHeader = "X-Github-Delivery"
-	eventHeader    = "X-Github-Event"
-	testSecret     = "test-secret"
-	deliveryID     = "d-1"
-	pingEvent      = "ping"
-	openedBody     = `{"action":"opened"}`
+	sigHeader        = "X-Hub-Signature-256"
+	deliveryHeader   = "X-Github-Delivery"
+	eventHeader      = "X-Github-Event"
+	testSecret       = "test-secret"
+	deliveryID       = "d-1"
+	pingEvent        = "ping"
+	pullRequestEvent = "pull_request"
+	openedBody       = `{"action":"opened"}`
 )
 
 func sign(secret, body string) string {
@@ -88,7 +89,7 @@ func postDelivery(t *testing.T, handler http.Handler) int {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", strings.NewReader(openedBody))
 	req.Header.Set(sigHeader, sign(testSecret, openedBody))
 	req.Header.Set(deliveryHeader, deliveryID)
-	req.Header.Set(eventHeader, "pull_request")
+	req.Header.Set(eventHeader, pullRequestEvent)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -111,7 +112,7 @@ func TestWebhook(t *testing.T) {
 			name: "valid",
 			body: body,
 			header: map[string]string{
-				sigHeader: sign(testSecret, body), deliveryHeader: deliveryID, eventHeader: "pull_request",
+				sigHeader: sign(testSecret, body), deliveryHeader: deliveryID, eventHeader: pullRequestEvent,
 			},
 			want: http.StatusAccepted,
 		},
@@ -181,7 +182,7 @@ func TestWebhookHeaders(t *testing.T) {
 		event    string
 		want     int
 	}{
-		{"real GUID", guid, "pull_request", http.StatusAccepted},
+		{"real GUID", guid, pullRequestEvent, http.StatusAccepted},
 		{"event with digits", deliveryID, "projects_v2_status_update", http.StatusAccepted},
 		{"delivery id of 64 characters", strings.Repeat("a", 64), pingEvent, http.StatusAccepted},
 		{"event of 64 characters", deliveryID, strings.Repeat("a", 64), http.StatusAccepted},
@@ -307,7 +308,8 @@ func TestNewDeliveryQueued(t *testing.T) {
 		t.Fatalf("Pending: %v", err)
 	}
 
-	if len(entries) != 1 || entries[0].Delivery != deliveryID || string(entries[0].Body) != openedBody {
+	if len(entries) != 1 || entries[0].Delivery != deliveryID || entries[0].Event != pullRequestEvent ||
+		string(entries[0].Body) != openedBody {
 		t.Fatalf("pending = %+v", entries)
 	}
 

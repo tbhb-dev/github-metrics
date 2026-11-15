@@ -110,6 +110,8 @@ GO_TARGETS = [
     "//internal/receiver:receiver_test",
     "//internal/store",
     "//internal/store:store_test",
+    "//internal/worker",
+    "//internal/worker:worker_test",
     "//internal/version",
     "//internal/version:version_test",
 ]
@@ -136,7 +138,10 @@ gomutants_test(
     go_mod = "go.mod",
     go_sum = "go.sum",
     proxy = "@go_mod_proxy//:proxy",
-    tests = ["//internal/store:store_test"],
+    tests = [
+        "//internal/store:store_test",
+        "//internal/worker:worker_test",
+    ],
 )
 
 # The scheduled Linux run reports survivors without failing and always checks
@@ -158,7 +163,10 @@ gomutants_test(
     proxy = "@go_mod_proxy//:proxy",
     require_scope = "full",
     tags = ["manual"],
-    tests = ["//internal/store:store_test"],
+    tests = [
+        "//internal/store:store_test",
+        "//internal/worker:worker_test",
+    ],
 )
 
 # gobco_test is available, but its type checker cannot resolve the test-only

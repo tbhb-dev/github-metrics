@@ -91,7 +91,7 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, repo st
 		return
 	}
 
-	outcome, err := repo.Enqueue(delivery, body.Bytes())
+	outcome, err := repo.Enqueue(delivery, event, body.Bytes())
 	if err != nil {
 		log.ErrorContext(req.Context(), "enqueue delivery",
 			"delivery", oneLine(delivery),

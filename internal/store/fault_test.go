@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	queueName    = "queue"
-	queueIDsName = "queue_deliveries"
+	queueName       = "queue"
+	queueIDsName    = "queue_deliveries"
+	queueEventsName = "queue_events"
 )
 
 func rawDB(t *testing.T, path string) *bolt.DB {
@@ -153,6 +154,7 @@ func TestAppendConflictingBucket(t *testing.T) {
 		{"dedupe_deliveries", "record delivery:", []byte("d1")},
 		{queueName, "append body to queue:", sequence},
 		{queueIDsName, "append delivery ID to queue:", sequence},
+		{queueEventsName, "append event to queue:", sequence},
 	} {
 		t.Run(test.bucket, func(t *testing.T) {
 			t.Parallel()
@@ -166,7 +168,7 @@ func TestAppendConflictingBucket(t *testing.T) {
 
 			conflict(t, repo.Database(), test.bucket, test.key)
 
-			outcome, err := repo.Enqueue("d1", []byte("body"))
+			outcome, err := repo.Enqueue("d1", "pull_request", []byte("body"))
 
 			if outcome != 0 {
 				t.Fatalf("outcome = %v, want 0", outcome)
@@ -179,7 +181,7 @@ func TestAppendConflictingBucket(t *testing.T) {
 				return setupError(txn.Bucket([]byte(test.bucket)).DeleteBucket(test.key))
 			})
 
-			outcome, err = repo.Enqueue("d1", []byte("body"))
+			outcome, err = repo.Enqueue("d1", "pull_request", []byte("body"))
 
 			if err != nil || outcome != store.Enqueued {
 				t.Fatalf("retry = %v, %v", outcome, err)
@@ -196,7 +198,7 @@ func TestAppendConflictingBucket(t *testing.T) {
 func TestRemoveConflictingBucket(t *testing.T) {
 	t.Parallel()
 
-	for _, bucket := range []string{queueName, queueIDsName} {
+	for _, bucket := range []string{queueName, queueIDsName, queueEventsName} {
 		t.Run(bucket, func(t *testing.T) {
 			t.Parallel()
 
@@ -212,8 +214,12 @@ func TestRemoveConflictingBucket(t *testing.T) {
 			conflict(t, repo.Database(), bucket, key)
 
 			context := "delete body:"
-			if bucket == queueIDsName {
+
+			switch bucket {
+			case queueIDsName:
 				context = "delete delivery ID:"
+			case queueEventsName:
+				context = "delete event:"
 			}
 
 			requireError(t, repo.Remove(1), boltErrors.ErrIncompatibleValue, context)
@@ -231,7 +237,7 @@ func TestRemoveDeletesDeliveryID(t *testing.T) {
 
 	t.Cleanup(func() { _ = repo.Close() })
 
-	_, err = repo.Enqueue("d1", []byte("body"))
+	_, err = repo.Enqueue("d1", "pull_request", []byte("body"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,8 +248,10 @@ func TestRemoveDeletesDeliveryID(t *testing.T) {
 	}
 
 	err = repo.Database().View(func(txn *bolt.Tx) error {
-		if txn.Bucket([]byte(queueIDsName)).Get(binary.BigEndian.AppendUint64(nil, 1)) != nil {
-			t.Fatal("Remove kept the queued delivery ID")
+		for _, name := range []string{queueIDsName, queueEventsName} {
+			if txn.Bucket([]byte(name)).Get(binary.BigEndian.AppendUint64(nil, 1)) != nil {
+				t.Fatalf("Remove kept queue metadata in %s", name)
+			}
 		}
 
 		return nil
@@ -263,7 +271,7 @@ func TestPendingMissingDeliveryID(t *testing.T) {
 
 	t.Cleanup(func() { _ = repo.Close() })
 
-	_, err = repo.Enqueue("d1", []byte("body"))
+	_, err = repo.Enqueue("d1", "pull_request", []byte("body"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +330,7 @@ func TestCloseFileError(t *testing.T) {
 func TestInitializeBucketNameConflict(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{queueName, queueIDsName, "dedupe_bodies", "dedupe_deliveries", "meta"} {
+	for _, name := range []string{queueName, queueIDsName, queueEventsName, "dedupe_bodies", "dedupe_deliveries", "meta"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
