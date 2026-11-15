@@ -20,6 +20,9 @@ import (
 	"github.com/tbhb-dev/github-metrics/internal/ghclient"
 )
 
+// searchPath is the request path that the tests answer as a search resource.
+const searchPath = "/search"
+
 // spentHeader is a response header for a resource with no requests left.
 func spentHeader(resource string, reset int64) http.Header {
 	header := http.Header{}
@@ -76,7 +79,7 @@ func TestSpentNonCoreLimitLeavesCoreRunning(t *testing.T) {
 	synctestRun(t, func(ctx context.Context) {
 		reset := time.Now().Add(10 * time.Minute).Unix()
 		client := fakeClient(t, func(req *http.Request) *http.Response {
-			if req.URL.Path == "/search" && time.Now().Unix() < reset {
+			if req.URL.Path == searchPath && time.Now().Unix() < reset {
 				return reply(http.StatusForbidden, spentHeader("search", reset))
 			}
 
@@ -86,7 +89,7 @@ func TestSpentNonCoreLimitLeavesCoreRunning(t *testing.T) {
 		done := make(chan error, 1)
 
 		go func() {
-			_, err := client.Get(ctx, budget.Webhook, "/search")
+			_, err := client.Get(ctx, budget.Webhook, searchPath)
 			done <- err
 		}()
 
@@ -183,24 +186,140 @@ func TestSpentCoreResetIsCappedAtOneHour(t *testing.T) {
 	t.Parallel()
 
 	// Each reset is built inside the bubble, so each is relative to the fake clock.
-	for _, reset := range []func(now time.Time) int64{
-		func(now time.Time) int64 { return now.Add(time.Hour).Unix() },
-		func(now time.Time) int64 { return now.Add(48 * time.Hour).Unix() },
-		func(time.Time) int64 { return math.MaxInt64 },
-		func(time.Time) int64 { return math.MinInt64 },
+	year2099 := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC).Unix()
+
+	for _, test := range []struct {
+		reset   func(now time.Time) int64
+		atLeast time.Duration
+	}{
+		{func(now time.Time) int64 { return now.Add(time.Hour).Unix() }, 59 * time.Minute},
+		{func(now time.Time) int64 { return now.Add(48 * time.Hour).Unix() }, 59 * time.Minute},
+		{func(time.Time) int64 { return year2099 }, 59 * time.Minute},
+		{func(time.Time) int64 { return math.MinInt64 }, 0},
 	} {
 		synctestRun(t, func(ctx context.Context) {
 			var calls atomic.Int32
 
-			value := reset(time.Now())
+			value := test.reset(time.Now())
 			client := fakeClient(t, limitedOnce(http.StatusForbidden, spentHeader(budget.CoreResource, value), &calls))
 
 			waited, err := getWaited(ctx, t, client)
-			if err != nil || waited > time.Hour+time.Minute {
+			if err != nil || waited < test.atLeast || waited > time.Hour+time.Minute {
 				t.Fatalf("reset %d: err = %v, waited %v", value, err, waited)
 			}
 		})
 	}
+}
+
+// TestImplausibleResetIsInvalid covers resets too large to be real, which
+// time.Unix would wrap into the past, and a signed reset.
+func TestImplausibleResetIsInvalid(t *testing.T) {
+	t.Parallel()
+
+	for _, reset := range []string{strconv.FormatInt(math.MaxInt64, 10), "99999999999", "+99"} {
+		synctestRun(t, func(ctx context.Context) {
+			var calls atomic.Int32
+
+			header := spentHeader("search", 0)
+			header.Set("X-Ratelimit-Reset", reset)
+			client := fakeClient(t, limitedOnce(http.StatusForbidden, header, &calls))
+
+			_, err := getWaited(ctx, t, client)
+			if !errors.Is(err, ghclient.ErrGaveUp) || calls.Load() != 1 {
+				t.Fatalf("reset %q: err = %v, calls = %d", reset, err, calls.Load())
+			}
+		})
+	}
+}
+
+func TestSpentNonCoreWithoutUsableResetGivesUpAfterOneSend(t *testing.T) {
+	t.Parallel()
+
+	for _, reset := range []string{"", "soon", "1.5"} {
+		synctestRun(t, func(ctx context.Context) {
+			var calls atomic.Int32
+
+			header := spentHeader("search", 0)
+			header.Del("X-Ratelimit-Reset")
+
+			if reset != "" {
+				header.Set("X-Ratelimit-Reset", reset)
+			}
+
+			client := fakeClient(t, func(*http.Request) *http.Response {
+				calls.Add(1)
+
+				return reply(http.StatusForbidden, header)
+			})
+
+			waited, err := getWaited(ctx, t, client)
+			if !errors.Is(err, ghclient.ErrGaveUp) || calls.Load() != 1 || waited != 0 {
+				t.Fatalf("reset %q: err = %v, calls = %d, waited %v", reset, err, calls.Load(), waited)
+			}
+		})
+	}
+}
+
+func TestSpentNonCorePastResetEveryTimeGivesUpAfterThreeWaits(t *testing.T) {
+	t.Parallel()
+
+	synctestRun(t, func(ctx context.Context) {
+		var calls atomic.Int32
+
+		reset := time.Now().Add(-5 * time.Second).Unix()
+		client := fakeClient(t, func(*http.Request) *http.Response {
+			calls.Add(1)
+
+			return reply(http.StatusForbidden, spentHeader("search", reset))
+		})
+
+		waited, err := getWaited(ctx, t, client)
+		if !errors.Is(err, ghclient.ErrGaveUp) || calls.Load() != 4 {
+			t.Fatalf("err = %v, calls = %d", err, calls.Load())
+		}
+
+		if waited != 9*time.Second {
+			t.Fatalf("waited %v", waited)
+		}
+	})
+}
+
+func TestSpentNonCorePastResetLeavesCoreRunning(t *testing.T) {
+	t.Parallel()
+
+	synctestRun(t, func(ctx context.Context) {
+		var calls atomic.Int32
+
+		reset := time.Now().Add(-5 * time.Second).Unix()
+		client := fakeClient(t, func(req *http.Request) *http.Response {
+			if req.URL.Path == searchPath && calls.Add(1) == 1 {
+				return reply(http.StatusForbidden, spentHeader("search", reset))
+			}
+
+			return reply(http.StatusOK, http.Header{})
+		})
+
+		done := make(chan error, 1)
+
+		go func() {
+			_, err := client.Get(ctx, budget.Webhook, searchPath)
+			done <- err
+		}()
+
+		synctest.Wait() // search is now in its short wait
+
+		start := time.Now()
+
+		_, err := client.Get(ctx, budget.Webhook, "/core")
+		if err != nil || time.Since(start) > time.Second {
+			t.Fatalf("core request: err = %v, waited %v", err, time.Since(start))
+		}
+
+		searchErr := <-done
+		if searchErr != nil {
+			t.Fatal(searchErr)
+		}
+	})
 }
 
 func TestExactlyOneHourResetWaitsAnHour(t *testing.T) {
@@ -278,7 +397,7 @@ func TestSpentNonCoreSecondaryBodyPausesCoreToo(t *testing.T) {
 
 		reset := time.Now().Add(time.Minute).Unix()
 		client := fakeClient(t, func(req *http.Request) *http.Response {
-			if req.URL.Path == "/search" && calls.Add(1) == 1 {
+			if req.URL.Path == searchPath && calls.Add(1) == 1 {
 				res := reply(http.StatusForbidden, spentHeader("search", reset))
 				res.Body = io.NopCloser(strings.NewReader(`{"message":"You have exceeded a secondary rate limit."}`))
 
@@ -291,7 +410,7 @@ func TestSpentNonCoreSecondaryBodyPausesCoreToo(t *testing.T) {
 		done := make(chan error, 1)
 
 		go func() {
-			_, err := client.Get(ctx, budget.Webhook, "/search")
+			_, err := client.Get(ctx, budget.Webhook, searchPath)
 			done <- err
 		}()
 
