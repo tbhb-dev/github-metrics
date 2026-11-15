@@ -232,8 +232,8 @@ func TestImplausibleResetIsInvalid(t *testing.T) {
 }
 
 // TestResetBoundsAreValid covers the first value each bound accepts. A reset
-// of 60 is long past, so it waits pastResetWait. A reset of 4102444800 is far
-// ahead, so it waits the one-hour cap, not pastResetWait.
+// of 60 is long past and waits pastResetWait. The top bound, 4102444800, is
+// far ahead and waits the one-hour cap instead.
 func TestResetBoundsAreValid(t *testing.T) {
 	t.Parallel()
 
