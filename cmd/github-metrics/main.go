@@ -129,7 +129,7 @@ func run(addr string, log *slog.Logger) error {
 
 type noopRecorder struct{}
 
-func (noopRecorder) RecordPullRequest(_, _ string) error { return errNoRecorder }
+func (noopRecorder) Record(_ context.Context, _ string, _ []byte) error { return errNoRecorder }
 
 // probe asks the local health endpoint and returns the exit code.
 func probe(addr string) int {

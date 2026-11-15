@@ -105,6 +105,8 @@ GO_TARGETS = [
     "//internal/budget:budget_test",
     "//internal/ghclient",
     "//internal/ghclient:ghclient_test",
+    "//internal/recorder",
+    "//internal/recorder:recorder_test",
     "//internal/receiver",
     "//deploy:deploy_test",
     "//internal/receiver:receiver_test",

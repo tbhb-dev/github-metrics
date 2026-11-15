@@ -16,11 +16,10 @@ go_library(
 
 go_test(
     name = "worker_test",
-    srcs = [
-        "export_test.go",
-        "worker_test.go",
-    ],
-    embed = [":worker"],
+    srcs = ["worker_test.go"],
     visibility = ["//:__pkg__"],
-    deps = ["//internal/store"],
+    deps = [
+        ":worker",
+        "//internal/store",
+    ],
 )

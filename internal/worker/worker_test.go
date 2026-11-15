@@ -25,7 +25,6 @@ const (
 	removeFirst              = "remove 1"
 	pullRequestEvent         = "pull_request"
 	openedBody               = `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"opened"}`
-	badBodyReason            = "bad pull request body"
 )
 
 type queueStub struct {
@@ -49,38 +48,10 @@ func (q *queueStub) Pending(limit int) ([]store.Entry, error) {
 
 func (q *queueStub) Remove(seq uint64) error { return q.remove(seq) }
 
-type recorderFunc func(string, string) error
+type recorderFunc func(context.Context, string, []byte) error
 
-func (f recorderFunc) RecordPullRequest(repo, action string) error { return f(repo, action) }
-
-func TestParse(t *testing.T) {
-	t.Parallel()
-
-	for _, test := range []struct {
-		name, body, repository, action string
-		bad                            bool
-	}{
-		{"opened", openedBody, "tbhb-dev/github-metrics", "opened", false},
-		{
-			"closed with unused fields",
-			`{"action":"closed","repository":{"full_name":"tbhb-dev/wiki","id":1},"pull_request":{"number":2}}`,
-			"tbhb-dev/wiki", "closed", false,
-		},
-		{"bad JSON", `{"action":`, "", "", true},
-		{"bad action type", `{"action":1}`, "", "", true},
-		{"bad repository type", `{"repository":{"full_name":1}}`, "", "", true},
-		{"empty repository", `{"repository":{"full_name":""},"action":"opened"}`, "", "", true},
-		{"empty action", `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":""}`, "", "", true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-
-			repository, action, err := worker.Parse([]byte(test.body))
-			if (err != nil) != test.bad || repository != test.repository || action != test.action {
-				t.Fatalf("parse = %q, %q, %v", repository, action, err)
-			}
-		})
-	}
+func (f recorderFunc) Record(ctx context.Context, event string, body []byte) error {
+	return f(ctx, event, body)
 }
 
 func TestPass(t *testing.T) {
@@ -88,25 +59,25 @@ func TestPass(t *testing.T) {
 
 	for _, test := range []struct {
 		name, event, body, log string
+		recordErr              error
 		want                   []string
 		queued                 int
 	}{
 		{
-			"record before remove", pullRequestEvent, openedBody, "",
-			[]string{"record tbhb-dev/github-metrics opened", removeFirst},
+			"record before remove", pullRequestEvent, openedBody, "", nil,
+			[]string{"record " + pullRequestEvent + " " + openedBody, removeFirst},
 			0,
 		},
-		{"bad body kept", pullRequestEvent, `{"action":`, badBodyReason, nil, 1},
-		{"empty fields kept", pullRequestEvent, `{}`, badBodyReason, nil, 1},
 		{
-			"empty repository kept", pullRequestEvent, `{"repository":{"full_name":""},"action":"opened"}`,
-			badBodyReason, nil, 1,
+			"raw body passed through", "ping", `{"action":`, "", nil,
+			[]string{`record ping {"action":`, removeFirst},
+			0,
 		},
 		{
-			"empty action kept", pullRequestEvent, `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":""}`,
-			badBodyReason, nil, 1,
+			"recorder error kept", "ping\r\n", openedBody, "event=ping", store.ErrCorrupt,
+			[]string{"record ping\r\n " + openedBody},
+			1,
 		},
-		{"other event kept", "ping\r\n", openedBody, "event=ping", nil, 1},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -127,10 +98,10 @@ func TestPass(t *testing.T) {
 					return nil
 				},
 			}
-			recorder := recorderFunc(func(repository, action string) error {
-				calls = append(calls, "record "+repository+" "+action)
+			recorder := recorderFunc(func(_ context.Context, event string, body []byte) error {
+				calls = append(calls, "record "+event+" "+string(body))
 
-				return nil
+				return test.recordErr
 			})
 
 			err := worker.New(&queue, recorder, slog.New(slog.NewTextHandler(&logs, nil))).Pass(t.Context())
@@ -185,7 +156,7 @@ func TestPassDrainsBatches(t *testing.T) {
 			return nil
 		},
 	}
-	consumer := worker.New(&queue, recorderFunc(func(_, _ string) error {
+	consumer := worker.New(&queue, recorderFunc(func(_ context.Context, _ string, _ []byte) error {
 		recorded++
 
 		return nil
@@ -229,7 +200,7 @@ func testRecorderRetry(t *testing.T, passes int) {
 	var records int
 
 	recordErr := store.ErrCorrupt
-	consumer := worker.New(queue, recorderFunc(func(_, _ string) error {
+	consumer := worker.New(queue, recorderFunc(func(_ context.Context, _ string, _ []byte) error {
 		records++
 
 		return recordErr
@@ -320,7 +291,7 @@ func TestRunPollsAndCancelStops(t *testing.T) {
 		}
 		consumer := worker.New(
 			&queue,
-			recorderFunc(func(_, _ string) error {
+			recorderFunc(func(_ context.Context, _ string, _ []byte) error {
 				t.Error("unexpected record")
 
 				return nil
@@ -375,7 +346,7 @@ func TestCancelDuringBatchStops(t *testing.T) {
 	}
 	consumer := worker.New(
 		&queue,
-		recorderFunc(func(_, _ string) error {
+		recorderFunc(func(_ context.Context, _ string, _ []byte) error {
 			records++
 
 			cancel()
@@ -399,7 +370,7 @@ func twoEntries() []store.Entry {
 }
 
 func countRecords(records *int) recorderFunc {
-	return func(_, _ string) error {
+	return func(_ context.Context, _ string, _ []byte) error {
 		*records++
 
 		return nil
