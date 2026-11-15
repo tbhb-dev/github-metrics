@@ -107,6 +107,8 @@ GO_TARGETS = [
     "//internal/receiver",
     "//deploy:deploy_test",
     "//internal/receiver:receiver_test",
+    "//internal/store",
+    "//internal/store:store_test",
     "//internal/version",
     "//internal/version:version_test",
 ]
