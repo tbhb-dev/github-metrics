@@ -145,6 +145,23 @@ func TestSpentNonCoreSecondaryWithoutWaitRetries(t *testing.T) {
 	})
 }
 
+func TestSpentNonCorePastResetWaitsBrieflyAndRetries(t *testing.T) {
+	t.Parallel()
+
+	synctestRun(t, func(ctx context.Context) {
+		var calls atomic.Int32
+
+		// A local clock ahead of GitHub's makes a fresh reset look past.
+		reset := time.Now().Add(-5 * time.Second).Unix()
+		client := fakeClient(t, limitedOnce(http.StatusForbidden, spentHeader("search", reset), &calls))
+
+		waited, err := getWaited(ctx, t, client)
+		if err != nil || calls.Load() != 2 || waited < time.Second || waited > 10*time.Second {
+			t.Fatalf("err = %v, calls = %d, waited %v", err, calls.Load(), waited)
+		}
+	})
+}
+
 func TestSpentCore429WaitsForReset(t *testing.T) {
 	t.Parallel()
 

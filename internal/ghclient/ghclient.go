@@ -32,6 +32,10 @@ const (
 	maxRetryAfter = 15 * time.Minute
 	// maxETags bounds the stored tags.
 	maxETags = 10000
+	// pastResetWait is the wait for a spent non-core response whose reset is
+	// already past, as when the local clock runs ahead of GitHub's.
+	pastResetWait = 3 * time.Second
+
 	// bodyProbe is how much of a 403 body is searched for a secondary limit.
 	bodyProbe = 4096
 
@@ -372,8 +376,10 @@ func namesSecondary(got *reply) bool {
 // makes a response secondary, as does a body with the secondary-limit text. A
 // secondary response with no wait of its own retries, since the shared pause
 // is the wait and the next send waits it out in the limiter. It returns
-// ErrGaveUp for another resource with no wait that isn't secondary, because
-// a retry would fail the same way. On the last attempt it skips the own wait,
+// ErrGaveUp for another resource that isn't secondary and has no usable
+// reset, because a retry would fail the same way. A reset that's already
+// past counts as usable: the clocks may differ, so it waits pastResetWait and
+// retries. On the last attempt it skips the own wait,
 // since no send is left.
 func (c *Client) primaryBackoff(ctx context.Context, got *reply, last bool) error {
 	resource := got.header.Get("X-Ratelimit-Resource")
@@ -395,7 +401,11 @@ func (c *Client) primaryBackoff(ctx context.Context, got *reply, last bool) erro
 			return nil
 		}
 
-		return ErrGaveUp
+		if !hasReset(got.header) {
+			return ErrGaveUp
+		}
+
+		wait = pastResetWait
 	}
 
 	if last {
@@ -411,6 +421,14 @@ func (c *Client) primaryBackoff(ctx context.Context, got *reply, last bool) erro
 	case <-timer.C:
 		return nil
 	}
+}
+
+// hasReset is true when `x-ratelimit-reset` holds a positive integer, even
+// one that's past.
+func hasReset(header http.Header) bool {
+	reset, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-Ratelimit-Reset")), 10, 64)
+
+	return err == nil && reset > 0
 }
 
 // untilReset returns the time to the `x-ratelimit-reset` of a response,
