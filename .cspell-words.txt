@@ -205,3 +205,4 @@ bbolt
 readyz
 structurizr
 tsvg
+tpng
