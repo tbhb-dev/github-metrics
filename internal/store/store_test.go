@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -242,6 +243,10 @@ func TestCreatedIsRecordedOnce(t *testing.T) {
 
 func TestNewFileMode(t *testing.T) {
 	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows reports every file as 0666, so the mode bits don't map there")
+	}
 
 	path := filepath.Join(t.TempDir(), "store.db")
 	open(t, path)
