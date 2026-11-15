@@ -573,7 +573,7 @@
     "@@tbhb_rules_go+//:extensions.bzl%go_mod_proxy": {
       "general": {
         "bzlTransitiveDigest": "d+aJfWyHtvw15XRr3GCXF8ABJb7tZ9TtQRIX66t8F8g=",
-        "usagesDigest": "ZOd/KT7/IIEzLfVlUAxo+Lo3cpKQaI66+tQcbGo3bVk=",
+        "usagesDigest": "4i3E4CuD9NbKnJFTCIoaWAxrhczf5zeK/775iboCwg8=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "go_mod_proxy": {
