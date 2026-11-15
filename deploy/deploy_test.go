@@ -303,7 +303,7 @@ func TestComposeTakesTheImageVariable(t *testing.T) {
 	}
 }
 
-func tunnelService(t *testing.T) string {
+func serviceBlock(t *testing.T, service string) string {
 	t.Helper()
 
 	raw := composeText(t)
@@ -333,7 +333,7 @@ func tunnelService(t *testing.T) string {
 		isKey := !strings.HasPrefix(line, "   ")
 
 		switch {
-		case top == "services:" && line == "  tunnel:":
+		case top == "services:" && line == "  "+service+":":
 			inside = true
 		case isKey:
 			inside = false
@@ -345,10 +345,31 @@ func tunnelService(t *testing.T) string {
 	}
 
 	if len(block) == 0 {
-		t.Fatal("compose.yaml has no tunnel service")
+		t.Fatalf("compose.yaml has no %s service", service)
 	}
 
 	return strings.Join(block, "\n")
+}
+
+func TestReceiverServiceSettings(t *testing.T) {
+	t.Parallel()
+
+	block := serviceBlock(t, "receiver")
+
+	for _, want := range []string{
+		"\n    user: \"65532:65532\"\n",
+		"\n    read_only: true\n",
+		"\n      STORE_FILE: /var/lib/github-metrics/store.db\n",
+		"\n    volumes:\n      - store:/var/lib/github-metrics\n",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("the receiver service lacks %q", strings.TrimSpace(want))
+		}
+	}
+
+	if !strings.Contains(composeText(t), "\nvolumes:\n  store: {}\n") {
+		t.Error("compose.yaml does not define the named store volume")
+	}
 }
 
 // TestTunnelServiceSettings reads the block for the pinned image, the token
@@ -356,7 +377,7 @@ func tunnelService(t *testing.T) string {
 func TestTunnelServiceSettings(t *testing.T) {
 	t.Parallel()
 
-	block := tunnelService(t)
+	block := serviceBlock(t, "tunnel")
 
 	image := regexp.MustCompile(`(?m)^    image: cloudflare/cloudflared:[0-9][0-9.]*@sha256:[0-9a-f]{64}$`)
 	if !image.MatchString(block) {

@@ -15,6 +15,9 @@
 # for the receiver and `secrets/tunnel_token` for the tunnel connector. Compose
 # bind-mounts each file as it is, so the host file itself must be readable by
 # the numeric user below (65532), for example owned by 65532 with mode 0400.
+# The named `store` volume mounts at `/var/lib/github-metrics`, which the image
+# creates owned by 65532:65532 so the receiver can write its store file while
+# the root filesystem stays read-only.
 #
 # The tunnel connector makes outbound connections only. Its route is set in
 # Cloudflare, because a token-run connector takes its routes from there. That
@@ -42,7 +45,10 @@ services:
     restart: unless-stopped
     environment:
       LISTEN_ADDR: ":8080"
+      STORE_FILE: /var/lib/github-metrics/store.db
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
+    volumes:
+      - store:/var/lib/github-metrics
     secrets:
       - webhook_secret
     networks:
@@ -107,3 +113,6 @@ secrets:
 
 networks:
   edge: {}
+
+volumes:
+  store: {}
