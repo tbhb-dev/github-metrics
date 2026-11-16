@@ -4,7 +4,10 @@
 package recorder_test
 
 import (
+	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -14,7 +17,192 @@ import (
 	"github.com/tbhb-dev/github-metrics/internal/recorder"
 )
 
+type cycleTimeTest struct {
+	name, event, action, createdAt, end, body, source string
+	merged                                            bool
+	seconds                                           float64
+}
+
+func TestRecordCycleTime(t *testing.T) {
+	t.Parallel()
+
+	const (
+		created = "2026-11-15T12:00:00Z"
+		ended   = "2026-11-15T13:00:00Z"
+		earlier = "2026-11-15T11:00:00Z"
+		trailer = "Generated-by: discard this text; started_at="
+	)
+
+	for _, test := range []cycleTimeTest{
+		{"created only", pullRequestEvent, closedState, created, ended, "", createdSource, true, 3600},
+		{"earlier trailer", pullRequestEvent, closedState, created, ended, trailer + earlier, startedAtSource, true, 7200},
+		{"later trailer", pullRequestEvent, closedState, created, ended, trailer + ended, createdSource, true, 3600},
+		{closedState, pullRequestEvent, closedState, created, ended, "", createdSource, false, 3600},
+		{"end before start", pullRequestEvent, closedState, created, earlier, "", "", true, 0},
+		{
+			"malformed trailer", pullRequestEvent, closedState, created, ended,
+			trailer + "2026-99-15T11:00:00Z\n" + trailer + "2026-11-15T11:00:00+00:00", createdSource, true, 3600,
+		},
+		{
+			"two trailers", pullRequestEvent, closedState, created, ended,
+			trailer + created + "\nAssisted-by: discard this text; started_at: " + earlier, startedAtSource, true, 7200,
+		},
+		{"missing merged time", pullRequestEvent, closedState, created, "", "", "", true, 0},
+		{
+			"no body text retained", pullRequestEvent, closedState, created, ended,
+			"discard this text\n" + trailer + earlier, startedAtSource, true, 7200,
+		},
+		{
+			"plain body ignored", pullRequestEvent, closedState, created, ended,
+			"started_at=" + earlier, createdSource, true, 3600,
+		},
+		{"missing created time", pullRequestEvent, closedState, "", ended, trailer + earlier, "", true, 0},
+		{"bad end time", pullRequestEvent, closedState, created, "invalid", "", "", true, 0},
+		{"missing closed time", pullRequestEvent, closedState, created, "", "", "", false, 0},
+		{"open PR", pullRequestEvent, "opened", created, ended, trailer + earlier, "", false, 0},
+		{"other event", checkRunEvent, closedState, created, ended, trailer + earlier, "", true, 0},
+		{"equal times", pullRequestEvent, closedState, created, created, "", createdSource, true, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			reader, state := recordCycleFixture(t, test)
+
+			checkCycleMetrics(t, reader, state, test.source, test.seconds)
+		})
+	}
+}
+
+func recordCycleFixture(t *testing.T, test cycleTimeTest) (*sdkmetric.ManualReader, string) {
+	t.Helper()
+
+	consumer, reader := newRecorder(t)
+
+	closedAt, state := test.end, closedState
+	if test.merged {
+		// Use a different closed_at to prove merged PRs use merged_at.
+		closedAt, state = "2026-11-15T10:00:00Z", "merged"
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"repository": map[string]string{"full_name": repositoryName},
+		"action":     test.action,
+		"pull_request": map[string]any{
+			"merged": test.merged, "created_at": test.createdAt,
+			"merged_at": test.end, "closed_at": closedAt, "body": test.body,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = consumer.Record(t.Context(), test.event, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return reader, state
+}
+
+func newRecorder(t *testing.T) (*recorder.Recorder, *sdkmetric.ManualReader) {
+	t.Helper()
+
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+
+	t.Cleanup(func() {
+		err := provider.Shutdown(t.Context())
+		if err != nil {
+			t.Error(err)
+		}
+	})
+
+	consumer, err := recorder.New(provider.Meter("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return consumer, reader
+}
+
+func checkCycleMetrics(t *testing.T, reader *sdkmetric.ManualReader, state, source string, seconds float64) {
+	t.Helper()
+
+	var data metricdata.ResourceMetrics
+
+	err := reader.Collect(t.Context(), &data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if strings.Contains(fmt.Sprint(data), "discard this text") {
+		t.Fatal("body text retained in metric data")
+	}
+
+	found := false
+
+	for _, scope := range data.ScopeMetrics {
+		for _, measurement := range scope.Metrics {
+			if measurement.Name == droppedName {
+				t.Fatal("skipped cycle time counted as a drop")
+			}
+
+			if measurement.Name != "github.pr.cycle_time" {
+				continue
+			}
+
+			found = true
+
+			checkCycleHistogram(t, measurement, state, source, seconds)
+		}
+	}
+
+	if found != (source != "") {
+		t.Fatalf("cycle time present = %v, want %v", found, source != "")
+	}
+}
+
+func checkCycleHistogram(t *testing.T, measurement metricdata.Metrics, state, source string, seconds float64) {
+	t.Helper()
+
+	histogram, ok := measurement.Data.(metricdata.Histogram[float64])
+	if !ok || measurement.Unit != "s" || len(histogram.DataPoints) != 1 {
+		t.Fatalf("expected one histogram in seconds, got %v", measurement)
+	}
+
+	point := histogram.DataPoints[0]
+	bounds := []float64{60, 300, 900, 1800, 3600, 7200, 14400, 28800, 86400, 172800, 604800, 1209600}
+	counts := make([]uint64, len(bounds)+1)
+	bucket := 0
+
+	for bucket < len(bounds) && seconds > bounds[bucket] {
+		bucket++
+	}
+
+	counts[bucket] = 1
+
+	if point.Count != 1 || point.Sum != seconds || !reflect.DeepEqual(point.Bounds, bounds) ||
+		!reflect.DeepEqual(point.BucketCounts, counts) {
+		t.Fatalf("unexpected cycle time histogram: %v", point)
+	}
+
+	attrs := make(map[string]string)
+	for _, attr := range point.Attributes.ToSlice() {
+		attrs[string(attr.Key)] = attr.Value.AsString()
+	}
+
+	want := map[string]string{repositoryKey: repositoryName, "state": state, "start_source": source}
+	if !reflect.DeepEqual(attrs, want) {
+		t.Fatalf("attributes = %v, want %v", attrs, want)
+	}
+}
+
 const (
+	droppedName       = "github.events.dropped"
+	closedState       = "closed"
+	startedAtSource   = "started_at"
+	createdSource     = "pr_created"
+	repositoryName    = "tbhb-dev/github-metrics"
 	pullRequestEvent  = "pull_request"
 	checkRunEvent     = "check_run"
 	actionKey         = "action"
@@ -33,8 +221,8 @@ func TestRecord(t *testing.T) {
 	}{
 		{
 			map[string]map[string]string{
-				eventsName:         {repositoryKey: "tbhb-dev/github-metrics", eventKey: pullRequestEvent, actionKey: "closed"},
-				"github.pr.merges": {repositoryKey: "tbhb-dev/github-metrics"},
+				eventsName:         {repositoryKey: repositoryName, eventKey: pullRequestEvent, actionKey: closedState},
+				"github.pr.merges": {repositoryKey: repositoryName},
 			},
 			"merge", pullRequestEvent,
 			`{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"closed",` +
@@ -43,7 +231,7 @@ func TestRecord(t *testing.T) {
 		},
 		{
 			map[string]map[string]string{
-				eventsName: {repositoryKey: unknownRepository, eventKey: pullRequestEvent, actionKey: "closed"},
+				eventsName: {repositoryKey: unknownRepository, eventKey: pullRequestEvent, actionKey: closedState},
 			},
 			"closed without merge", pullRequestEvent, `{"action":"closed","pull_request":{"merged":false}}`,
 		},
@@ -68,33 +256,20 @@ func TestRecord(t *testing.T) {
 			"other event with empty action", "ping", `{}`,
 		},
 		{
-			map[string]map[string]string{"github.events.dropped": {"reason": "empty_event"}},
+			map[string]map[string]string{droppedName: {"reason": "empty_event"}},
 			"legacy entry", "", `{}`,
 		},
 		{
-			map[string]map[string]string{"github.events.dropped": {"reason": "bad_body"}},
+			map[string]map[string]string{droppedName: {"reason": "bad_body"}},
 			"bad JSON", pullRequestEvent, `{"action":`,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			reader := sdkmetric.NewManualReader()
-			provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+			consumer, reader := newRecorder(t)
 
-			t.Cleanup(func() {
-				shutdownErr := provider.Shutdown(t.Context())
-				if shutdownErr != nil {
-					t.Error(shutdownErr)
-				}
-			})
-
-			consumer, err := recorder.New(provider.Meter("test"))
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			err = consumer.Record(t.Context(), test.event, []byte(test.body))
+			err := consumer.Record(t.Context(), test.event, []byte(test.body))
 			if err != nil {
 				t.Fatal(err)
 			}
