@@ -39,6 +39,7 @@ distroless
 docstrings
 dunder
 dupl
+embeddedstructfieldcheck
 endfor
 errchkjson
 esac
