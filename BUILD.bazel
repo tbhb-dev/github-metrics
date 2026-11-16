@@ -102,6 +102,8 @@ nogo(
 GO_TARGETS = [
     "//cmd/github-metrics:github-metrics_lib",
     "//cmd/github-metrics:github-metrics_test",
+    "//internal/backfill",
+    "//internal/backfill:backfill_test",
     "//internal/budget",
     "//internal/budget:budget_test",
     "//internal/ghclient",
