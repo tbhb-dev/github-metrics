@@ -108,7 +108,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Bazel for CI
-        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@90c4054c67304574d83c82e0b7a4763ceaa85748  # main
+        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@60295689201c97560855aebec77af4ff8c836ae9  # main
         with:
           disk-cache: nightly-mutation-linux
           cache-save: true
