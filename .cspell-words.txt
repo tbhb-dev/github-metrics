@@ -1,6 +1,7 @@
 # Project vocabulary for cspell: tool, command and package names that
 # the bundled dictionaries lack. Add only real terms; fix typos instead.
 addopts
+appauth
 autobuild
 autouse
 awrel
@@ -42,6 +43,7 @@ dupl
 embeddedstructfieldcheck
 endfor
 errchkjson
+errorlint
 esac
 execpath
 exhaustruct
