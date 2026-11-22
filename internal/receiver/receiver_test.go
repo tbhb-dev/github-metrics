@@ -8,6 +8,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -123,16 +124,20 @@ func TestWebhook(t *testing.T) {
 			want:   http.StatusUnauthorized,
 		},
 		{
-			name:   "wrong secret",
-			body:   body,
-			header: map[string]string{sigHeader: sign("other", body), deliveryHeader: deliveryID},
-			want:   http.StatusUnauthorized,
+			name: "wrong secret",
+			body: body,
+			header: map[string]string{
+				sigHeader: sign("other", body), deliveryHeader: deliveryID, eventHeader: pullRequestEvent,
+			},
+			want: http.StatusUnauthorized,
 		},
 		{
-			name:   "signature of another body",
-			body:   body,
-			header: map[string]string{sigHeader: sign(testSecret, "x"), deliveryHeader: deliveryID},
-			want:   http.StatusUnauthorized,
+			name: "signature of another body",
+			body: body,
+			header: map[string]string{
+				sigHeader: sign(testSecret, "x"), deliveryHeader: deliveryID, eventHeader: pullRequestEvent,
+			},
+			want: http.StatusUnauthorized,
 		},
 		{
 			name:   "not hex",
@@ -150,10 +155,12 @@ func TestWebhook(t *testing.T) {
 			want: http.StatusUnauthorized,
 		},
 		{
-			name:   "too large",
-			body:   strings.Repeat("a", receiver.MaxBody+1),
-			header: map[string]string{sigHeader: sign(testSecret, body), deliveryHeader: deliveryID},
-			want:   http.StatusRequestEntityTooLarge,
+			name: "too large",
+			body: strings.Repeat("a", receiver.MaxBody+1),
+			header: map[string]string{
+				sigHeader: sign(testSecret, body), deliveryHeader: deliveryID, eventHeader: pullRequestEvent,
+			},
+			want: http.StatusRequestEntityTooLarge,
 		},
 	}
 
@@ -219,6 +226,8 @@ func TestWebhookHeaders(t *testing.T) {
 	}
 }
 
+const noDeliveryIDCase = "bad signature and no delivery id"
+
 func TestBadSignature(t *testing.T) {
 	t.Parallel()
 
@@ -226,28 +235,157 @@ func TestBadSignature(t *testing.T) {
 
 	good := sign(testSecret, body)
 	tests := map[string]string{
-		"bad signature and no delivery id": "", // set below
-		"first digest byte differs":        tamper(good, 0),
-		"last digest byte differs":         tamper(good, -1),
-		"digest truncated":                 good[:len(good)-2],
-		"digest extended":                  good + "00",
+		noDeliveryIDCase:            "", // set below
+		"first digest byte differs": tamper(good, 0),
+		"last digest byte differs":  tamper(good, -1),
+		"digest truncated":          good[:len(good)-2],
+		"digest extended":           good + "00",
 	}
-	tests["bad signature and no delivery id"] = sign("other", body)
+	tests[noDeliveryIDCase] = sign("other", body)
 
 	for name, signature := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			header := map[string]string{sigHeader: signature}
-			if name != "bad signature and no delivery id" {
+			header := map[string]string{sigHeader: signature, eventHeader: pullRequestEvent}
+			if name != noDeliveryIDCase {
 				header[deliveryHeader] = deliveryID
 			}
 
+			want := http.StatusUnauthorized
+			if name == noDeliveryIDCase {
+				// Header shape is checked before authentication, so no body is read.
+				want = http.StatusBadRequest
+			}
+
 			got := do(t, testSecret, http.MethodPost, "/webhook", body, header)
-			if got != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", got)
+			if got != want {
+				t.Errorf("status = %d, want %d", got, want)
 			}
 		})
+	}
+}
+
+type failReader struct {
+	t *testing.T
+}
+
+func (r failReader) Read(_ []byte) (int, error) {
+	r.t.Helper()
+	r.t.Error("unexpected body read")
+
+	return 0, io.EOF
+}
+
+func TestWebhookEarlyRejectReadsNoBody(t *testing.T) {
+	t.Parallel()
+
+	validSig := sign(testSecret, openedBody)
+
+	tests := []struct {
+		header        map[string]string
+		name          string
+		body          string
+		contentLength int64
+		want          int
+	}{
+		{
+			name:          "missing signature",
+			body:          "",
+			contentLength: 0,
+			header:        map[string]string{deliveryHeader: deliveryID, eventHeader: pullRequestEvent},
+			want:          http.StatusUnauthorized,
+		},
+		{
+			name:          "malformed signature",
+			body:          "",
+			contentLength: 0,
+			header: map[string]string{
+				sigHeader: "sha256=zz", deliveryHeader: deliveryID, eventHeader: pullRequestEvent,
+			},
+			want: http.StatusUnauthorized,
+		},
+		{
+			name:          "missing event",
+			body:          "",
+			contentLength: 0,
+			header:        map[string]string{sigHeader: validSig, deliveryHeader: deliveryID},
+			want:          http.StatusBadRequest,
+		},
+		{
+			name:          "missing delivery id",
+			body:          "",
+			contentLength: 0,
+			header:        map[string]string{sigHeader: validSig, eventHeader: pullRequestEvent},
+			want:          http.StatusBadRequest,
+		},
+		{
+			name:          "malformed delivery id",
+			body:          "",
+			contentLength: 0,
+			header: map[string]string{
+				sigHeader: validSig, deliveryHeader: "not a delivery id!", eventHeader: pullRequestEvent,
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name:          "malformed event",
+			body:          "",
+			contentLength: 0,
+			header: map[string]string{
+				sigHeader: validSig, deliveryHeader: deliveryID, eventHeader: "pull request!",
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name:          "content length above max body",
+			body:          "",
+			contentLength: receiver.MaxBody + 1,
+			header: map[string]string{
+				sigHeader: validSig, deliveryHeader: deliveryID, eventHeader: pullRequestEvent,
+			},
+			want: http.StatusRequestEntityTooLarge,
+		},
+		{
+			name:          "valid request",
+			body:          openedBody,
+			contentLength: int64(len(openedBody)),
+			header: map[string]string{
+				sigHeader: validSig, deliveryHeader: deliveryID, eventHeader: pullRequestEvent,
+			},
+			want: http.StatusAccepted,
+		},
+	}
+
+	for _, spec := range tests {
+		t.Run(spec.name, func(t *testing.T) {
+			t.Parallel()
+			runEarlyReject(t, spec.header, spec.body, spec.contentLength, spec.want)
+		})
+	}
+}
+
+func runEarlyReject(t *testing.T, header map[string]string, body string, contentLength int64, want int) {
+	t.Helper()
+
+	var bodyReader io.Reader = failReader{t: t}
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", bodyReader)
+	req.ContentLength = contentLength
+
+	for name, value := range header {
+		req.Header.Set(name, value)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != want {
+		t.Errorf("status = %d, want %d", rec.Code, want)
 	}
 }
 
