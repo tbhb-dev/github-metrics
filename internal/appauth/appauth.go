@@ -1,0 +1,245 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright Tony Burns
+
+// Package appauth supplies tokens for one GitHub App installation.
+package appauth
+
+import (
+	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	renewBefore       = 5 * time.Minute
+	issuedBefore      = time.Minute
+	assertionLifetime = 9 * time.Minute
+	maxBody           = 1 << 20
+)
+
+// ErrAuth reports a failure without exposing credentials or response text.
+var ErrAuth = errors.New("github app authentication failed")
+
+// Config identifies one installation. Nil HTTPClient, Now, and Logger fields
+// use the standard HTTP client, system clock, and default logger.
+type Config struct {
+	HTTPClient     *http.Client
+	Now            func() time.Time
+	Logger         *slog.Logger
+	BaseURL        string
+	PrivateKeyPEM  []byte
+	AppID          int64
+	InstallationID int64
+}
+
+// Source caches tokens. Make one with New.
+type Source struct {
+	expires  time.Time
+	http     *http.Client
+	now      func() time.Time
+	log      *slog.Logger
+	key      *rsa.PrivateKey
+	endpoint string
+	token    string
+	appID    int64
+	mu       sync.Mutex
+}
+
+// New parses the private key without sending a request. It accepts an RSA key
+// in PKCS1 or PKCS8 form and an absolute HTTP or HTTPS API base URL.
+func New(cfg Config) (*Source, error) {
+	if cfg.HTTPClient == nil {
+		cfg.HTTPClient = http.DefaultClient
+	}
+
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
+
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+
+	base, err := url.Parse(cfg.BaseURL)
+	if err != nil || base.Host == "" || (base.Scheme != "https" && base.Scheme != "http") ||
+		base.User != nil || base.RawQuery != "" || base.ForceQuery || base.Fragment != "" ||
+		cfg.AppID <= 0 || cfg.InstallationID <= 0 {
+		cfg.Logger.Error("github app authentication failed", "stage", "config", "status", 0)
+
+		return nil, ErrAuth
+	}
+
+	key, err := parseKey(cfg.PrivateKeyPEM)
+	if err != nil {
+		cfg.Logger.Error("github app authentication failed", "stage", "key", "status", 0)
+
+		return nil, ErrAuth
+	}
+
+	client := *cfg.HTTPClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+	return &Source{
+		http: &client,
+		now:  cfg.Now,
+		log:  cfg.Logger,
+		key:  key,
+		endpoint: strings.TrimRight(base.String(), "/") + "/app/installations/" +
+			strconv.FormatInt(cfg.InstallationID, 10) + "/access_tokens",
+		token:   "",
+		expires: time.Time{},
+		appID:   cfg.AppID,
+		mu:      sync.Mutex{},
+	}, nil
+}
+
+func parseKey(data []byte) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, ErrAuth
+	}
+
+	var (
+		key *rsa.PrivateKey
+		err error
+	)
+
+	switch block.Type {
+	case "RSA PRIVATE KEY":
+		key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+	case "PRIVATE KEY":
+		var parsed any
+
+		parsed, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+
+		var ok bool
+
+		key, ok = parsed.(*rsa.PrivateKey)
+		if !ok {
+			return nil, ErrAuth
+		}
+	default:
+		return nil, ErrAuth
+	}
+
+	if err != nil || key == nil || key.Validate() != nil {
+		return nil, ErrAuth
+	}
+
+	return key, nil
+}
+
+// Token returns the cached token until less than five minutes remain.
+func (s *Source) Token(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.token != "" && s.expires.Sub(s.now()) >= renewBefore {
+		return s.token, nil
+	}
+
+	return s.fetch(ctx)
+}
+
+// Renew discards the cached token and fetches a new one.
+func (s *Source) Renew(ctx context.Context) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.fetch(ctx)
+}
+
+func (s *Source) assertion() (string, error) {
+	now := s.now()
+	claims := struct {
+		Issuer   int64 `json:"iss"`
+		IssuedAt int64 `json:"iat"`
+		Expires  int64 `json:"exp"`
+	}{Issuer: s.appID, IssuedAt: now.Add(-issuedBefore).Unix(), Expires: now.Add(assertionLifetime).Unix()}
+
+	body, err := json.Marshal(claims)
+	if err != nil {
+		return "", ErrAuth
+	}
+
+	unsigned := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","typ":"JWT"}`)) + "." +
+		base64.RawURLEncoding.EncodeToString(body)
+	digest := sha256.Sum256([]byte(unsigned))
+
+	signature, err := rsa.SignPKCS1v15(rand.Reader, s.key, crypto.SHA256, digest[:])
+	if err != nil {
+		return "", ErrAuth
+	}
+
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(signature), nil
+}
+
+func (s *Source) failure(ctx context.Context, stage string, status int) (string, error) {
+	s.log.ErrorContext(ctx, "github app authentication failed", "stage", stage, "status", status)
+
+	return "", ErrAuth
+}
+
+func (s *Source) fetch(ctx context.Context) (string, error) {
+	s.token = ""
+	s.expires = time.Time{}
+
+	assertion, err := s.assertion()
+	if err != nil {
+		return s.failure(ctx, "sign", 0)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, nil)
+	if err != nil {
+		return s.failure(ctx, "request", 0)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+assertion)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-Github-Api-Version", "2022-11-28")
+
+	res, err := s.http.Do(req)
+	if err != nil {
+		return s.failure(ctx, "send", 0)
+	}
+
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusCreated {
+		return s.failure(ctx, "status", res.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(res.Body, maxBody+1))
+	if err != nil || len(body) > maxBody {
+		return s.failure(ctx, "read", res.StatusCode)
+	}
+
+	var reply struct {
+		ExpiresAt time.Time `json:"expires_at"` //nolint:tagliatelle // GitHub defines this field with an underscore.
+		Token     string    `json:"token"`
+	}
+
+	if json.Unmarshal(body, &reply) != nil || reply.Token == "" || !reply.ExpiresAt.After(s.now()) {
+		return s.failure(ctx, "decode", res.StatusCode)
+	}
+
+	s.token = reply.Token
+	s.expires = reply.ExpiresAt
+
+	return s.token, nil
+}
