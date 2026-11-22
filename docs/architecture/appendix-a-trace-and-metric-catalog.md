@@ -149,7 +149,7 @@ The service records durations itself because Tempo's metrics generator can't der
 | `vcs.repository.name` | About 50 | Tens of repositories today, with headroom |
 | `github.author.type` | 2 | `user` or `bot` |
 
-Each instrument has 50 × 2 = 100 attribute sets. The review states give the review counter 400, and the end states and start sources give the cycle time histogram 400. Series counts below are for native histograms and for the explicit-bucket fallback of D15, which has 15 boundaries, 16 buckets, a sum, and a count, so 18 series per attribute set.
+Each instrument has 50 × 2 = 100 attribute sets, except the main status gauge, which is keyed by `repository` alone and has 50. The review states give the review counter 400, and the end states and start sources give the cycle time histogram 400. Series counts below are for native histograms and for the explicit-bucket fallback of D15, which has 15 boundaries, 16 buckets, a sum, and a count, so 18 series per attribute set.
 
 | Instruments | Native histograms | Explicit fallback |
 | --- | --- | --- |
@@ -187,7 +187,7 @@ A Grafana dashboard then shows the rule outputs, the open PR count and oldest op
 
 Metrics leave through the SDK's periodic reader every 60 seconds with cumulative aggregation, which keeps running totals in memory instead of a queue of observations. A crash or restart loses every observation recorded since the last export the collector accepted. That's normally at most 60 seconds. During a collector outage, though, the loss covers the whole outage, with no time bound.
 
-Memory use doesn't grow during an outage, because cumulative state keeps one total per attribute set, capped at 25,900 series. Lost observations stay lost, since the worker already committed their milestones and won't record them a second time. Backends see a counter reset.
+Memory use doesn't grow during an outage, because cumulative state keeps one total per attribute set, capped at 25,950 series. Lost observations stay lost, since the worker already committed their milestones and won't record them a second time. Backends see a counter reset.
 
 ### Store loss and restore
 

@@ -24,7 +24,7 @@ import (
 // MaxBody is the largest body the receiver reads, 2 MiB. The events this
 // service records are tens of kilobytes, and a sender can stream up to this
 // much before the signature check can reject it. GitHub sends payloads up to
-// 25 MiB, so a larger event of any kind gets 413.
+// 25 MB, so a larger event of any kind gets 413.
 const MaxBody = 2 << 20
 
 // MaxInFlight caps the deliveries whose bodies are being read at once. Each
