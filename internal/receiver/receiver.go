@@ -57,6 +57,20 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, repo st
 		return
 	}
 
+	event := req.Header.Get("X-Github-Event")
+	if event == "" {
+		log.WarnContext(req.Context(), "rejected delivery", "reason", "bad delivery or event header")
+		resp.WriteHeader(http.StatusBadRequest)
+
+		return
+	}
+
+	if req.ContentLength > MaxBody {
+		resp.WriteHeader(http.StatusRequestEntityTooLarge)
+
+		return
+	}
+
 	var body bytes.Buffer
 
 	mac := hmac.New(sha256.New, secret)
@@ -82,7 +96,6 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, repo st
 	}
 
 	delivery := req.Header.Get("X-Github-Delivery")
-	event := req.Header.Get("X-Github-Event")
 
 	if !deliveryPattern.MatchString(delivery) || !eventPattern.MatchString(event) {
 		log.WarnContext(req.Context(), "rejected delivery", "reason", "bad delivery or event header")
