@@ -94,11 +94,7 @@ func webhook(
 		defer func() { <-slots }()
 	default:
 		log.WarnContext(req.Context(), "rejected delivery", "reason", "too many deliveries in flight")
-		resp.Header().Set("Retry-After", "5")
-		// Close the connection so the server doesn't drain the unread body
-		// outside the slot limit.
-		resp.Header().Set("Connection", "close")
-		resp.WriteHeader(http.StatusServiceUnavailable)
+		rejectBusy(resp)
 
 		return
 	}
@@ -176,4 +172,31 @@ func parseSignature(secret []byte, header string) ([]byte, bool) {
 	}
 
 	return digest, true
+}
+
+// rejectBusy answers 503 and closes the connection. Go drains up to 256 KiB
+// of an unread body after the handler returns, outside the slot limit, even
+// with Connection: close. Writing the response on a hijacked connection and
+// closing it skips that drain.
+func rejectBusy(resp http.ResponseWriter) {
+	conn, buf, err := http.NewResponseController(resp).Hijack()
+	if err != nil {
+		// No hijack, as with an HTTP/2 connection or a test recorder.
+		resp.Header().Set("Retry-After", "5")
+		resp.Header().Set("Connection", "close")
+		resp.WriteHeader(http.StatusServiceUnavailable)
+
+		return
+	}
+
+	defer func() { _ = conn.Close() }()
+
+	const busy = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+
+	_, err = buf.WriteString(busy)
+	if err != nil {
+		return
+	}
+
+	_ = buf.Flush()
 }

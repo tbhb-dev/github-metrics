@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -596,7 +597,7 @@ func TestInFlightLimit(t *testing.T) {
 
 // A rejected delivery's answer must not wait for its body, or slow rejected
 // bodies would read concurrently outside the limit.
-func TestInFlightRejectDoesNotWaitForBody(t *testing.T) {
+func TestInFlightRejectClosesConnection(t *testing.T) {
 	t.Parallel()
 
 	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
@@ -605,34 +606,45 @@ func TestInFlightRejectDoesNotWaitForBody(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	free := holdSlots(t, handler)
+	defer free()
 
-	// The body is a pipe that never closes, so the client sends it chunked.
-	pipeRead, pipeWrite := io.Pipe()
+	for _, framing := range []string{"Content-Length: 1000", "Transfer-Encoding: chunked"} {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 
-	t.Cleanup(func() { _ = pipeWrite.Close() })
+		conn, err := new(net.Dialer).DialContext(ctx, "tcp", srv.Listener.Addr().String())
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
+		// Send the headers and a short piece of the body, then stop.
+		head := "POST /webhook HTTP/1.1\r\nHost: x\r\n" + framing + "\r\n" +
+			sigHeader + ": " + sign(testSecret, openedBody) + "\r\n" +
+			deliveryHeader + ": " + deliveryID + "\r\n" +
+			eventHeader + ": " + pingEvent + "\r\n\r\n"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/webhook", pipeRead)
-	if err != nil {
-		t.Fatal(err)
+		_, err = conn.Write([]byte(head + "a"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// The server must answer 503 and then close, with the body unfinished.
+		answer, err := io.ReadAll(conn)
+		if err != nil {
+			t.Errorf("%s: connection stayed open after the 503: %v", framing, err)
+		}
+
+		if !strings.HasPrefix(string(answer), "HTTP/1.1 503 ") {
+			t.Errorf("%s: answer %q, want a 503", framing, answer)
+		}
+
+		_ = conn.Close()
+
+		cancel()
 	}
-
-	req.Header.Set(sigHeader, sign(testSecret, openedBody))
-	req.Header.Set(deliveryHeader, deliveryID)
-	req.Header.Set(eventHeader, pingEvent)
-
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("no answer before the body finished: %v", err)
-	}
-
-	_ = resp.Body.Close()
-
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Errorf("status %d, want 503", resp.StatusCode)
-	}
-
-	free()
 }
