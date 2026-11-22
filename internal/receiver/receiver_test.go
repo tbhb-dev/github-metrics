@@ -692,7 +692,8 @@ func (w *hijackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 // serveBusy sends one delivery to a handler whose slots are all held, so it gets the 503 path.
-func serveBusy(t *testing.T, conn *spyConn) {
+// It returns the time just before the request, so a test measures only the handler.
+func serveBusy(t *testing.T, conn *spyConn) time.Time {
 	t.Helper()
 
 	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
@@ -704,7 +705,12 @@ func serveBusy(t *testing.T, conn *spyConn) {
 	req.Header.Set(sigHeader, sign(testSecret, openedBody))
 	req.Header.Set(deliveryHeader, deliveryID)
 	req.Header.Set(eventHeader, pingEvent)
+
+	start := time.Now()
+
 	handler.ServeHTTP(&hijackWriter{ResponseWriter: httptest.NewRecorder(), conn: conn}, req)
+
+	return start
 }
 
 // TestInFlightRejectBoundsWrite checks that the 503 on a hijacked connection has a write deadline of about 5 s.
@@ -712,9 +718,7 @@ func TestInFlightRejectBoundsWrite(t *testing.T) {
 	t.Parallel()
 
 	conn := new(spyConn)
-	before := time.Now()
-
-	serveBusy(t, conn)
+	start := serveBusy(t, conn)
 
 	if !conn.closed {
 		t.Error("connection stayed open")
@@ -724,7 +728,7 @@ func TestInFlightRejectBoundsWrite(t *testing.T) {
 		t.Errorf("wrote %q, want a 503", conn.written.String())
 	}
 
-	wait := conn.deadline.Sub(before)
+	wait := conn.deadline.Sub(start)
 	if wait < 4*time.Second || wait > 6*time.Second {
 		t.Errorf("write deadline %v after the request, want about 5 s", wait)
 	}
@@ -737,7 +741,7 @@ func TestInFlightRejectDeadlineFailure(t *testing.T) {
 	conn := new(spyConn)
 	conn.deadlineErr = errNoDeadline
 
-	serveBusy(t, conn)
+	_ = serveBusy(t, conn)
 
 	if !conn.closed {
 		t.Error("connection stayed open")
