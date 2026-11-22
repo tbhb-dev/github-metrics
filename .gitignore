@@ -45,7 +45,7 @@ coverage.xml
 # Agents draft PRs here; the PR script lints it and opens the PR from it.
 .github/PULL_REQUEST_DRAFT.md
 
-# The webhook secret the Compose file mounts (deploy/compose.yaml).
+# Secret sources and the protected runtime key copy (deploy/compose.yaml).
 deploy/secrets/
 
 # Tracked here although global ignores often skip it: the pinned awrel MCP

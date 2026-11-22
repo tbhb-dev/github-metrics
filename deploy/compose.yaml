@@ -16,10 +16,11 @@
 # METRICS_NETWORK is required and names an existing network on the host.
 # Compose reads both from the environment or a .env file beside compose.yaml.
 #
-# Both secrets are files, never environment variables: `secrets/webhook_secret`
-# for the receiver and `secrets/tunnel_token` for the tunnel connector. Compose
-# bind-mounts each file as it is, so the host file itself must be readable by
-# the numeric user below (65532), for example owned by 65532 with mode 0400.
+# Secrets stay in files. The webhook secret and tunnel token retain host
+# ownership through Compose and need uid 65532 with mode 0400. The App key
+# source, secrets/github_app_key, stays owned by the deploy account with mode
+# 0600. up.sh prepares secrets/runtime/github_app_key with uid 65532 and mode
+# 0400 inside a root-owned mode-0700 directory before Compose mounts it.
 # The named `store` volume mounts at `/var/lib/github-metrics`, which the image
 # creates owned by 65532:65532 so the receiver can write its store file while
 # the root filesystem stays read-only.
@@ -52,11 +53,13 @@ services:
       LISTEN_ADDR: ":8080"
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       STORE_FILE: /var/lib/github-metrics/store.db
+      GITHUB_APP_KEY_FILE: /run/secrets/github_app_key
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
     volumes:
       - store:/var/lib/github-metrics
     secrets:
       - webhook_secret
+      - github_app_key
     networks:
       - edge
       - metrics
@@ -116,6 +119,8 @@ services:
         max-file: "3"
 
 secrets:
+  github_app_key:
+    file: ./secrets/runtime/github_app_key
   webhook_secret:
     file: ./secrets/webhook_secret
   tunnel_token:

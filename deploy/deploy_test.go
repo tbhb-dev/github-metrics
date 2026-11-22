@@ -9,24 +9,30 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 )
 
 const (
-	digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	repo   = "ghcr.io/tbhb-dev/github-metrics"
-	pull   = "--pull"
-	never  = "never"
+	digest        = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	repo          = "ghcr.io/tbhb-dev/github-metrics"
+	pull          = "--pull"
+	never         = "never"
+	envFile       = "--env-file"
+	forceRecreate = "--force-recreate"
 )
 
 // result is what one run of up.sh left behind.
 type result struct {
-	output string
-	record string
-	code   int
-	ran    bool
+	output   string
+	record   string
+	helper   string
+	dir      string
+	imageEnv string
+	code     int
+	ran      bool
 }
 
 // runUp runs up.sh under /bin/sh.
@@ -36,28 +42,84 @@ func runUp(t *testing.T, args ...string) result {
 	return runIn(t, "/bin/sh", args...)
 }
 
-// runIn runs up.sh under the given shell with the given arguments. PATH lists
-// one directory, which has a stub docker and links to the tools the script
-// calls. The locale is
-// UTF-8, which the script has to override, so the host's shell settings can't
-// change the outcome. The stub records the image variable and each argument,
-// every one ended by a zero byte, in a file, which shows whether the script got as
-// far as running Compose.
+// runIn runs up.sh with a private fixture and a Docker stub. Each source starts
+// with mode 600. PATH lists only the stub directory and links to host tools.
+// A helper call records its arguments before the stub returns. Successful
+// Compose calls also record the image from its environment file. Tests inspect
+// those records without a daemon or actual key material.
 func runIn(t *testing.T, shell string, args ...string) result {
 	t.Helper()
 
-	dir := t.TempDir()
-	record := filepath.Join(dir, "record")
-	stub := "#!/bin/sh\nprintf '%s\\0' \"$GITHUB_METRICS_IMAGE\" \"$@\" > '" + record + "'\n"
+	return runConfigured(t, shell, nil, args...)
+}
 
-	err := os.WriteFile(filepath.Join(dir, "docker"), []byte(stub), 0o700) //nolint:gosec // the stub must be executable
+func writeFixture(t *testing.T, path, content string, mode os.FileMode) {
+	t.Helper()
+
+	err := os.WriteFile(path, []byte(content), mode)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func makeSecrets(t *testing.T) string {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	err := os.Mkdir(filepath.Join(dir, "secrets"), 0o700)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// The script may call only these tools, so a new one is added here and in
-	// the script's header on purpose.
-	for _, tool := range []string{"grep", "dirname"} {
+	return dir
+}
+
+func readFixture(t *testing.T, path string) string {
+	t.Helper()
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(data)
+}
+
+func fixtureMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return info.Mode().Perm()
+}
+
+func prepareUpFixture(t *testing.T) string {
+	t.Helper()
+
+	dir := makeSecrets(t)
+	writeFixture(t, filepath.Join(dir, "up.sh"), readFixture(t, "up.sh"), 0o600)
+	writeFixture(t, filepath.Join(dir, "secrets/github_app_key"), "test key contents\n", 0o600)
+
+	stub := `#!/bin/sh
+if [ "$1" = run ]; then
+	printf '%s\0' "$@" > helper-record
+	if [ -f helper-exit ]; then read -r code < helper-exit; exit "$code"; fi
+	exit 0
+fi
+for arg do
+	case "$arg" in */secrets/.image.*) IFS= read -r image_line < "$arg" ;; esac
+done
+printf '%s\0' "${GITHUB_METRICS_IMAGE:-}" "$image_line" "$@" > record
+`
+	writeFixture(t, filepath.Join(dir, "docker"), stub, 0o700)
+	writeFixture(t, filepath.Join(dir, "sudo"), "#!/bin/sh\nunset GITHUB_METRICS_IMAGE\nexec \"$@\"\n", 0o700)
+
+	// PATH limits the host tools the script can call.
+	for _, tool := range []string{"grep", "dirname", "mktemp", "rm"} {
 		path, lookErr := exec.LookPath(tool)
 		if lookErr != nil {
 			t.Fatal(lookErr)
@@ -69,12 +131,29 @@ func runIn(t *testing.T, shell string, args ...string) result {
 		}
 	}
 
-	argv := append([]string{"up.sh"}, args...)
+	return dir
+}
+
+func runConfigured(t *testing.T, shell string, setup func(string), args ...string) result {
+	t.Helper()
+
+	dir := prepareUpFixture(t)
+	if setup != nil {
+		setup(dir)
+	}
+
+	argv := append([]string{"./up.sh"}, args...)
 	cmd := exec.CommandContext(t.Context(), shell, argv...)
+	cmd.Dir = dir
 	cmd.Env = []string{"PATH=" + dir, "LC_ALL=en_US.UTF-8"}
 
+	_, statErr := os.Stat(filepath.Join(dir, "use-sudo"))
+	if statErr == nil {
+		cmd.Env = append(cmd.Env, "DEPLOY_DOCKER_SUDO=1")
+	}
+
 	out, err := cmd.CombinedOutput()
-	res := result{output: string(out), record: "", code: 0, ran: false}
+	res := result{output: string(out), record: "", helper: "", dir: dir, imageEnv: "", code: 0, ran: false}
 
 	var exitErr *exec.ExitError
 
@@ -85,10 +164,26 @@ func runIn(t *testing.T, shell string, args ...string) result {
 		t.Fatal(err)
 	}
 
-	got, readErr := os.ReadFile(record)
+	got, readErr := os.ReadFile(filepath.Join(dir, "record"))
 	if readErr == nil {
 		res.ran = true
 		res.record = string(got)
+
+		for arg := range strings.SplitSeq(res.record, "\x00") {
+			if strings.HasPrefix(arg, filepath.Join(dir, "secrets/.image.")) {
+				res.imageEnv = arg
+			}
+		}
+
+		_, imageErr := os.Stat(res.imageEnv)
+		if !errors.Is(imageErr, os.ErrNotExist) {
+			t.Fatalf("image environment file remains after exit: %v", imageErr)
+		}
+	}
+
+	helper, helperErr := os.ReadFile(filepath.Join(dir, "helper-record"))
+	if helperErr == nil {
+		res.helper = string(helper)
 	}
 
 	return res
@@ -112,7 +207,21 @@ func checkRanIn(t *testing.T, shell, image string, args ...string) {
 		t.Fatalf("up.sh %s: exit %d, ran=%v: %s", image, res.code, res.ran, res.output)
 	}
 
-	want := append([]string{image, "compose", "-f", "./compose.yaml", "up", "-d"}, args...)
+	want := append(
+		[]string{
+			image,
+			"GITHUB_METRICS_IMAGE=" + image,
+			"compose",
+			envFile,
+			res.imageEnv,
+			"-f",
+			filepath.Join(res.dir, "compose.yaml"),
+			"up",
+			"-d",
+			forceRecreate,
+		},
+		args...,
+	)
 
 	if got := strings.Split(strings.TrimSuffix(res.record, "\x00"), "\x00"); !slices.Equal(got, want) {
 		t.Errorf("docker saw %q, want %q", got, want)
@@ -137,12 +246,12 @@ func refusedArgs() map[string][]string {
 	return map[string][]string{
 		"other compose file": {"-f", "other.yaml"},
 		"project name":       {"-p", "other"},
-		"env file":           {"--env-file", "other.env"},
+		"env file":           {envFile, "other.env"},
 		"pull always":        {pull, "always"},
 		"pull missing value": {pull},
 		"pull joined":        {"--pull=never"},
 		"pull in one word":   {"--pull never"},
-		"extra after pull":   {pull, never, "--force-recreate"},
+		"extra after pull":   {pull, never, forceRecreate},
 		"extra option":       {"--wait"},
 		"empty argument":     {""},
 		"empty pull value":   {pull, ""},
@@ -364,6 +473,8 @@ func TestReceiverServiceSettings(t *testing.T) {
 		"\n    user: \"65532:65532\"\n",
 		"\n    read_only: true\n",
 		"\n      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}\n",
+		"\n      GITHUB_APP_KEY_FILE: /run/secrets/github_app_key\n",
+		"\n    secrets:\n      - webhook_secret\n      - github_app_key\n",
 		"\n      STORE_FILE: /var/lib/github-metrics/store.db\n",
 		"\n    volumes:\n      - store:/var/lib/github-metrics\n",
 		"\n    networks:\n      - edge\n      - metrics\n",
@@ -428,5 +539,262 @@ func TestTunnelServiceSettings(t *testing.T) {
 		if strings.Contains(composeText(t), banned) {
 			t.Errorf("compose.yaml contains %q", banned)
 		}
+	}
+}
+
+func badKeySource(t *testing.T, dir, kind string) {
+	t.Helper()
+
+	key := filepath.Join(dir, "secrets/github_app_key")
+
+	err := os.Remove(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	switch kind {
+	case "directory":
+		err = os.Mkdir(key, 0o700)
+	case "symlink":
+		err = os.Symlink("../up.sh", key)
+	}
+
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUpRequiresKeySource(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []string{"missing", "directory", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+
+			res := runConfigured(t, "/bin/sh", func(dir string) {
+				badKeySource(t, dir, kind)
+			}, digest)
+			if res.code != 2 || res.ran || res.helper != "" ||
+				!strings.Contains(res.output, "must exist as a regular file") {
+				t.Fatalf("source %s: exit %d, ran=%v: %s", kind, res.code, res.ran, res.output)
+			}
+		})
+	}
+}
+
+func TestUpStopsAfterHelperFailure(t *testing.T) {
+	t.Parallel()
+
+	res := runConfigured(t, "/bin/sh", func(dir string) {
+		writeFixture(t, filepath.Join(dir, "helper-exit"), "1\n", 0o600)
+	}, digest)
+
+	if res.code == 0 || res.ran || res.helper == "" {
+		t.Fatalf("helper failure: exit %d, ran=%v: %s", res.code, res.ran, res.output)
+	}
+}
+
+func TestUpWithSudoAndDotEnv(t *testing.T) {
+	t.Parallel()
+
+	res := runConfigured(t, "/bin/sh", func(dir string) {
+		writeFixture(t, filepath.Join(dir, "use-sudo"), "", 0o600)
+		writeFixture(t, filepath.Join(dir, ".env"), "METRICS_NETWORK=metrics\n", 0o600)
+	}, digest)
+
+	want := []string{
+		"",
+		"GITHUB_METRICS_IMAGE=" + digest,
+		"compose",
+		envFile,
+		filepath.Join(res.dir, ".env"),
+		envFile,
+		res.imageEnv,
+		"-f",
+		filepath.Join(res.dir, "compose.yaml"),
+		"up",
+		"-d",
+		forceRecreate,
+	}
+
+	got := strings.Split(strings.TrimSuffix(res.record, "\x00"), "\x00")
+	if res.code != 0 || !res.ran || !slices.Equal(got, want) {
+		t.Fatalf("sudo deployment: exit %d, got %q, want %q: %s", res.code, got, want, res.output)
+	}
+}
+
+func keyHelperScript(t *testing.T) string {
+	t.Helper()
+
+	res := runUp(t, digest)
+	if res.code != 0 || res.helper == "" {
+		t.Fatalf("no helper: %s", res.output)
+	}
+
+	args := strings.Split(strings.TrimSuffix(res.helper, "\x00"), "\x00")
+	for _, want := range []string{
+		"--rm",
+		"--read-only",
+		"--network\x00none",
+		"--log-driver\x00none",
+		"--user\x000:0",
+		"--cap-add\x00CHOWN",
+		"--cap-add\x00DAC_OVERRIDE",
+		"busybox:1.37.0@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec",
+	} {
+		if !strings.Contains(res.helper, want) {
+			t.Errorf("helper lacks %q", want)
+		}
+	}
+
+	return args[len(args)-1]
+}
+
+// Host tools run the helper body in tests. Ownership changes use a stub.
+// Before copying, another stub checks directory permissions.
+func keyHelperCommand(t *testing.T, script, dir string) *exec.Cmd {
+	t.Helper()
+
+	prefix := `
+chown() { printf '%s\n' "$*" >> "$KEY_TEST_DIR/owners"; }
+cp() {
+	[ ! -f "$KEY_TEST_DIR/fail-copy" ] || return 1
+	[ "$(stat -c %a "$KEY_TEST_DIR/secrets/runtime")" = 700 ] || exit 1
+	command cp "$@"
+}
+mv() { command mv -f "$2" "$3"; }
+`
+	if runtime.GOOS == "darwin" {
+		prefix = "stat() { command stat -f %Lp \"$3\"; }\n" + prefix
+	}
+
+	script = strings.ReplaceAll(script, "/secrets", filepath.Join(dir, "secrets"))
+	script = strings.ReplaceAll(script, "/source", filepath.Join(dir, "secrets/github_app_key"))
+	//nolint:gosec // the script comes from the tracked deploy file
+	cmd := exec.CommandContext(
+		t.Context(),
+		"/bin/sh",
+		"-ec",
+		prefix+script,
+	)
+
+	cmd.Env = append(os.Environ(), "KEY_TEST_DIR="+dir)
+
+	return cmd
+}
+
+func checkKeyCopy(t *testing.T, dir string, mode os.FileMode) {
+	t.Helper()
+
+	copyPath := filepath.Join(dir, "secrets/runtime/github_app_key")
+	if fixtureMode(t, copyPath) != 0o400 {
+		t.Error("runtime key must have mode 400")
+	}
+
+	owners := readFixture(t, filepath.Join(dir, "owners"))
+	if !strings.Contains(owners, "0:0 "+filepath.Join(dir, "secrets/runtime")) ||
+		!strings.Contains(owners, "65532:65532 "+copyPath+".") {
+		t.Errorf("wrong owner requests: %s", owners)
+	}
+
+	if fixtureMode(t, filepath.Join(dir, "secrets/github_app_key")) != mode {
+		t.Error("source mode changed")
+	}
+}
+
+func checkRejectedMode(t *testing.T, dir string, out []byte, err error) {
+	t.Helper()
+
+	if err == nil || !strings.Contains(string(out), "must have mode 400 or 600") {
+		t.Fatalf("invalid mode: %v: %s", err, out)
+	}
+
+	_, statErr := os.Stat(filepath.Join(dir, "secrets/runtime"))
+	if !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("invalid source created runtime directory: %v", statErr)
+	}
+}
+
+func TestKeyHelperModes(t *testing.T) {
+	t.Parallel()
+
+	script := keyHelperScript(t)
+
+	for _, mode := range []os.FileMode{0o400, 0o600, 0o000, 0o200, 0o640, 0o644, 0o660, 0o700} {
+		t.Run(mode.String(), func(t *testing.T) {
+			t.Parallel()
+
+			dir := makeSecrets(t)
+			writeFixture(t, filepath.Join(dir, "secrets/github_app_key"), "test key contents\n", mode)
+			out, err := keyHelperCommand(t, script, dir).CombinedOutput()
+
+			allowed := mode == 0o400 || mode == 0o600
+			if !allowed {
+				checkRejectedMode(t, dir, out, err)
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("mode %o: %v: %s", mode, err, out)
+			}
+
+			checkKeyCopy(t, dir, mode)
+		})
+	}
+}
+
+func TestKeyHelperRotationAndFailure(t *testing.T) {
+	t.Parallel()
+
+	script := keyHelperScript(t)
+	dir := makeSecrets(t)
+	key := filepath.Join(dir, "secrets/github_app_key")
+	copyPath := filepath.Join(dir, "secrets/runtime/github_app_key")
+
+	for _, content := range []string{"first test key", "second test key"} {
+		writeFixture(t, key, content, 0o600)
+
+		out, err := keyHelperCommand(t, script, dir).CombinedOutput()
+		if err != nil {
+			t.Fatalf("prepare: %v: %s", err, out)
+		}
+
+		if readFixture(t, copyPath) != content {
+			t.Error("runtime copy doesn't match source")
+		}
+	}
+
+	writeFixture(t, filepath.Join(dir, "fail-copy"), "", 0o600)
+	writeFixture(t, key, "third test key", 0o600)
+
+	out, err := keyHelperCommand(t, script, dir).CombinedOutput()
+	if err == nil {
+		t.Fatalf("copy failure succeeded: %s", out)
+	}
+
+	if readFixture(t, copyPath) != "second test key" {
+		t.Error("failed copy replaced the previous key")
+	}
+
+	entries, readErr := os.ReadDir(filepath.Join(dir, "secrets/runtime"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+
+	if len(entries) != 1 || entries[0].Name() != "github_app_key" {
+		t.Errorf("temporary files remain: %v", entries)
+	}
+}
+
+func TestComposeKeySecret(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(composeText(t), "\n  github_app_key:\n    file: ./secrets/runtime/github_app_key\n") {
+		t.Error("App key secret doesn't use the protected runtime copy")
+	}
+
+	if strings.Contains(serviceBlock(t, "tunnel"), "github_app_key") {
+		t.Error("tunnel mounts the App key")
 	}
 }
