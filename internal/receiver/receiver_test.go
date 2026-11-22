@@ -250,9 +250,15 @@ func TestBadSignature(t *testing.T) {
 				header[deliveryHeader] = deliveryID
 			}
 
+			want := http.StatusUnauthorized
+			if name == "bad signature and no delivery id" {
+				// Header shape is checked before authentication, so no body is read.
+				want = http.StatusBadRequest
+			}
+
 			got := do(t, testSecret, http.MethodPost, "/webhook", body, header)
-			if got != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401", got)
+			if got != want {
+				t.Errorf("status = %d, want %d", got, want)
 			}
 		})
 	}
@@ -303,6 +309,31 @@ func TestWebhookEarlyRejectReadsNoBody(t *testing.T) {
 			contentLength: 0,
 			header:        map[string]string{sigHeader: validSig, deliveryHeader: deliveryID},
 			want:          http.StatusBadRequest,
+		},
+		{
+			name:          "missing delivery id",
+			body:          "",
+			contentLength: 0,
+			header:        map[string]string{sigHeader: validSig, eventHeader: pullRequestEvent},
+			want:          http.StatusBadRequest,
+		},
+		{
+			name:          "malformed delivery id",
+			body:          "",
+			contentLength: 0,
+			header: map[string]string{
+				sigHeader: validSig, deliveryHeader: "not a delivery id!", eventHeader: pullRequestEvent,
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name:          "malformed event",
+			body:          "",
+			contentLength: 0,
+			header: map[string]string{
+				sigHeader: validSig, deliveryHeader: deliveryID, eventHeader: "pull request!",
+			},
+			want: http.StatusBadRequest,
 		},
 		{
 			name:          "content length above max body",
