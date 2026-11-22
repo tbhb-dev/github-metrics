@@ -113,9 +113,16 @@ Gauges, read from the store at each collection:
 | --- | --- | --- |
 | `github.pull_request.open` | `{pull_request}` | The number of open PRs |
 | `github.pull_request.oldest_open_age` | `s` | The age of the oldest open PR, from its `created_at` |
-| `github.main.red` | None | `1` when the latest `conclusion` check on the default branch failed or timed out, `0` otherwise, keyed by `repository`; a repository appears only after its first main `conclusion` since a receiver restart |
 
 An open-PR table joins the store, with the node ID, repository, author type, and `created_at` of each open PR. The worker adds a row when a PR opens or reopens and removes it at merge or close, and the reconciler repairs rows that a missed webhook left wrong. A repository with no open PR reports 0 for the count and omits the age. When the service is down, both series go stale and the dashboard goes empty. Gauge values are state, so they can't double count, and a lost store refills from the backfill.
+
+The main status gauge differs from those two. The receiver holds it in memory and sets it from `check_run` webhooks, so a restart loses its value and the backfill doesn't refill it:
+
+| Instrument | Unit | Value |
+| --- | --- | --- |
+| `github.main.red` | None | `1` when the latest `conclusion` check on the default branch failed or timed out, `0` otherwise, keyed by `repository` |
+
+A repository appears only after its first main `conclusion` check since a receiver restart.
 
 The cycle time histogram runs from the start of the first agent run that contributed to the PR until the PR ends:
 
@@ -151,7 +158,8 @@ Each instrument has 50 × 2 = 100 attribute sets. The review states give the rev
 | Merged counter, 100 attribute sets | 100 | 100 |
 | Review counter, 400 attribute sets | 400 | 400 |
 | 2 gauges, 100 attribute sets each | 200 | 200 |
-| Total | 2,100 | 25,900 |
+| Main status gauge, 50 attribute sets | 50 | 50 |
+| Total | 2,150 | 25,950 |
 
 A cardinality limit in the SDK caps every instrument at 2,000 attribute sets. Sets beyond the cap fold into its overflow series.
 
