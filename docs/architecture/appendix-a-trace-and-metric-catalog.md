@@ -113,6 +113,7 @@ Gauges, read from the store at each collection:
 | --- | --- | --- |
 | `github.pull_request.open` | `{pull_request}` | The number of open PRs |
 | `github.pull_request.oldest_open_age` | `s` | The age of the oldest open PR, from its `created_at` |
+| `github.main.red` | None | `1` when the latest `conclusion` check on the default branch failed or timed out, `0` otherwise, keyed by `repository`; a repository appears only after its first main `conclusion` since a receiver restart |
 
 An open-PR table joins the store, with the node ID, repository, author type, and `created_at` of each open PR. The worker adds a row when a PR opens or reopens and removes it at merge or close, and the reconciler repairs rows that a missed webhook left wrong. A repository with no open PR reports 0 for the count and omits the age. When the service is down, both series go stale and the dashboard goes empty. Gauge values are state, so they can't double count, and a lost store refills from the backfill.
 
