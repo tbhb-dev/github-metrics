@@ -4,11 +4,13 @@
 package receiver_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -647,6 +649,102 @@ func TestInFlightRejectClosesConnection(t *testing.T) {
 		_ = conn.Close()
 
 		cancel()
+	}
+}
+
+var errNoDeadline = errors.New("no deadline")
+
+// spyConn records what rejectBusy does to a hijacked connection.
+type spyConn struct {
+	net.Conn
+
+	deadline    time.Time
+	deadlineErr error
+	written     bytes.Buffer
+	closed      bool
+}
+
+func (c *spyConn) SetWriteDeadline(deadline time.Time) error {
+	c.deadline = deadline
+
+	return c.deadlineErr
+}
+
+func (c *spyConn) Write(data []byte) (int, error) {
+	return c.written.Write(data) //nolint:wrapcheck // a test double passes the buffer's result through
+}
+
+func (c *spyConn) Close() error {
+	c.closed = true
+
+	return nil
+}
+
+// hijackWriter lets a test hand rejectBusy a connection it can inspect.
+type hijackWriter struct {
+	http.ResponseWriter
+
+	conn *spyConn
+}
+
+func (w *hijackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return w.conn, bufio.NewReadWriter(bufio.NewReader(strings.NewReader("")), bufio.NewWriter(w.conn)), nil
+}
+
+// serveBusy sends one delivery to a handler whose slots are all held, so it gets the 503 path.
+func serveBusy(t *testing.T, conn *spyConn) {
+	t.Helper()
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+	free := holdSlots(t, handler)
+
+	defer free()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", strings.NewReader(openedBody))
+	req.Header.Set(sigHeader, sign(testSecret, openedBody))
+	req.Header.Set(deliveryHeader, deliveryID)
+	req.Header.Set(eventHeader, pingEvent)
+	handler.ServeHTTP(&hijackWriter{ResponseWriter: httptest.NewRecorder(), conn: conn}, req)
+}
+
+// TestInFlightRejectBoundsWrite checks that the 503 on a hijacked connection has a write deadline of about 5 s.
+func TestInFlightRejectBoundsWrite(t *testing.T) {
+	t.Parallel()
+
+	conn := new(spyConn)
+	before := time.Now()
+
+	serveBusy(t, conn)
+
+	if !conn.closed {
+		t.Error("connection stayed open")
+	}
+
+	if !strings.HasPrefix(conn.written.String(), "HTTP/1.1 503 ") {
+		t.Errorf("wrote %q, want a 503", conn.written.String())
+	}
+
+	wait := conn.deadline.Sub(before)
+	if wait < 4*time.Second || wait > 6*time.Second {
+		t.Errorf("write deadline %v after the request, want about 5 s", wait)
+	}
+}
+
+// TestInFlightRejectDeadlineFailure checks that a failed deadline sends nothing and closes the connection.
+func TestInFlightRejectDeadlineFailure(t *testing.T) {
+	t.Parallel()
+
+	conn := new(spyConn)
+	conn.deadlineErr = errNoDeadline
+
+	serveBusy(t, conn)
+
+	if !conn.closed {
+		t.Error("connection stayed open")
+	}
+
+	if conn.written.Len() != 0 {
+		t.Errorf("wrote %q without a deadline", conn.written.String())
 	}
 }
 
