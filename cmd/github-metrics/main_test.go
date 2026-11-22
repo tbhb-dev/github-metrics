@@ -66,8 +66,8 @@ func TestNewRecorderWithEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(data.ScopeMetrics) != 1 || len(data.ScopeMetrics[0].Metrics) != 1 {
-		t.Fatalf("scope metrics = %v, want one counter", data.ScopeMetrics)
+	if len(data.ScopeMetrics) != 1 || len(data.ScopeMetrics[0].Metrics) == 0 {
+		t.Fatalf("scope metrics = %v, want counter observations", data.ScopeMetrics)
 	}
 
 	measurement := data.ScopeMetrics[0].Metrics[0]

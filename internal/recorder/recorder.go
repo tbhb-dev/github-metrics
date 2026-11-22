@@ -53,11 +53,17 @@ func New(meter metric.Meter) (*Recorder, error) {
 		*counter.target = instrument
 	}
 
+	for _, reason := range []string{"empty_event", "bad_body"} {
+		recorder.dropped.Add(context.Background(), 0,
+			metric.WithAttributes(attribute.String("reason", reason)))
+	}
+
 	var err error
 
 	recorder.cycleTime, err = meter.Float64Histogram("github.pr.cycle_time", metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(
-			60, 300, 900, 1800, 3600, 7200, 14400, 28800, 86400, 172800, 604800, 1209600,
+			60, 300, 600, 900, 1800, 3600, 7200, 14400, 28800,
+			86400, 172800, 259200, 345600, 432000, 518400, 604800, 1209600, 2592000,
 		))
 	if err != nil {
 		return nil, fmt.Errorf("create github.pr.cycle_time histogram: %w", err)
@@ -99,8 +105,12 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 	}
 
 	repo := attribute.String("repository", repository)
-	r.events.Add(ctx, 1, metric.WithAttributes(repo,
-		attribute.String("event", event), attribute.String("action", delivery.Action)))
+	r.merges.Add(ctx, 0, metric.WithAttributes(repo))
+
+	eventAttrs := metric.WithAttributes(repo,
+		attribute.String("event", event), attribute.String("action", delivery.Action))
+	r.events.Add(ctx, 0, eventAttrs)
+	r.events.Add(ctx, 1, eventAttrs)
 
 	if event == "pull_request" && delivery.Action == "closed" {
 		if delivery.PullRequest.Merged {
@@ -110,13 +120,28 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 		r.recordCycleTime(ctx, repo, delivery.PullRequest)
 	}
 
-	if event == "check_run" && delivery.Action == "completed" {
-		r.conclusions.Add(ctx, 1, metric.WithAttributes(repo,
-			attribute.String("check_name", delivery.CheckRun.Name),
-			attribute.String("conclusion", delivery.CheckRun.Conclusion)))
+	if event == "check_run" {
+		r.recordCheckRun(ctx, repo, delivery.Action, delivery.CheckRun.Name, delivery.CheckRun.Conclusion)
 	}
 
 	return nil
+}
+
+func (r *Recorder) recordCheckRun(ctx context.Context, repo attribute.KeyValue, action, name, conclusion string) {
+	checkName := attribute.String("check_name", name)
+
+	for _, known := range []string{
+		"success", "failure", "cancelled", "skipped", "neutral",
+		"timed_out", "action_required", "stale", "startup_failure",
+	} {
+		r.conclusions.Add(ctx, 0, metric.WithAttributes(repo, checkName,
+			attribute.String("conclusion", known)))
+	}
+
+	if action == "completed" {
+		r.conclusions.Add(ctx, 1, metric.WithAttributes(repo, checkName,
+			attribute.String("conclusion", conclusion)))
+	}
 }
 
 func (r *Recorder) recordCycleTime(ctx context.Context, repo attribute.KeyValue, request pullRequest) {
