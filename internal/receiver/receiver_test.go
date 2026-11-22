@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
@@ -508,5 +509,42 @@ func TestStoreErrorAnswers500(t *testing.T) {
 
 	if !strings.Contains(logs.String(), `"level":"ERROR"`) {
 		t.Errorf("log = %s, want an ERROR line", logs.String())
+	}
+}
+
+// countReader supplies endless bytes and counts how many the server took.
+type countReader struct{ read *atomic.Int64 }
+
+func (c countReader) Read(buf []byte) (int, error) {
+	c.read.Add(int64(len(buf)))
+
+	return len(buf), nil
+}
+
+// A chunked body has no Content-Length, so only the read bound stops it.
+func TestChunkedBodyStopsAtCap(t *testing.T) {
+	t.Parallel()
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+
+	var read atomic.Int64
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", countReader{read: &read})
+	req.ContentLength = -1
+	req.Header.Set(sigHeader, sign(testSecret, openedBody))
+	req.Header.Set(deliveryHeader, deliveryID)
+	req.Header.Set(eventHeader, pingEvent)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status %d, want 413", rec.Code)
+	}
+
+	// The bound allows one byte past the cap and the copy buffer reads in blocks.
+	const slack = 64 << 10
+	if got := read.Load(); got > receiver.MaxBody+slack {
+		t.Errorf("server read %d bytes of an endless chunked body, want at most %d", got, receiver.MaxBody+slack)
 	}
 }
