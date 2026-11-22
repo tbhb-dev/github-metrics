@@ -23,6 +23,11 @@ import (
 // MaxBody is GitHub's largest webhook payload, 25 MiB.
 const MaxBody = 25 << 20
 
+// MaxInFlight caps the deliveries whose bodies are being read at once. Each
+// can buffer up to MaxBody, so this bounds the receiver's body memory at
+// MaxInFlight times MaxBody, which is 400 MiB.
+const MaxInFlight = 16
+
 const signaturePrefix = "sha256="
 
 // The signature covers only the body, so both headers need their own check.
@@ -33,15 +38,18 @@ var (
 )
 
 // Handler serves GET /healthz and POST /webhook. Every other request, and a
-// non-POST request to /webhook, gets 404. It dispatches on the exact method
+// non-POST request to /webhook, gets 404. A delivery that arrives while
+// MaxInFlight others are being read gets 503 with Retry-After. It dispatches on the exact method
 // and path, with no path cleaning, so "//webhook" is a 404 and not a redirect.
 func Handler(secret []byte, repo store.Store, log *slog.Logger) http.Handler {
+	slots := make(chan struct{}, MaxInFlight)
+
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		switch {
 		case req.Method == http.MethodGet && req.URL.Path == "/healthz":
 			resp.WriteHeader(http.StatusOK)
 		case req.Method == http.MethodPost && req.URL.Path == "/webhook":
-			webhook(resp, req, secret, repo, log)
+			webhook(resp, req, secret, repo, log, slots)
 		default:
 			resp.WriteHeader(http.StatusNotFound)
 		}
@@ -49,7 +57,14 @@ func Handler(secret []byte, repo store.Store, log *slog.Logger) http.Handler {
 }
 
 // webhook authenticates the delivery and queues the body in the store.
-func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, repo store.Store, log *slog.Logger) {
+func webhook(
+	resp http.ResponseWriter,
+	req *http.Request,
+	secret []byte,
+	repo store.Store,
+	log *slog.Logger,
+	slots chan struct{},
+) {
 	want, ok := parseSignature(secret, req.Header.Get("X-Hub-Signature-256"))
 	if !ok {
 		reject(resp, req, log)
@@ -70,6 +85,17 @@ func webhook(resp http.ResponseWriter, req *http.Request, secret []byte, repo st
 
 	if req.ContentLength > MaxBody {
 		resp.WriteHeader(http.StatusRequestEntityTooLarge)
+
+		return
+	}
+
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	default:
+		log.WarnContext(req.Context(), "rejected delivery", "reason", "too many deliveries in flight")
+		resp.Header().Set("Retry-After", "5")
+		resp.WriteHeader(http.StatusServiceUnavailable)
 
 		return
 	}

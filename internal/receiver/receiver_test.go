@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
@@ -508,5 +509,70 @@ func TestStoreErrorAnswers500(t *testing.T) {
 
 	if !strings.Contains(logs.String(), `"level":"ERROR"`) {
 		t.Errorf("log = %s, want an ERROR line", logs.String())
+	}
+}
+
+// gateBody signals on its first Read, then blocks until release closes.
+type gateBody struct {
+	started chan<- struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (g *gateBody) Read(_ []byte) (int, error) {
+	g.once.Do(func() { g.started <- struct{}{} })
+	<-g.release
+
+	return 0, io.EOF
+}
+
+func TestInFlightLimit(t *testing.T) {
+	t.Parallel()
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+	started := make(chan struct{}, receiver.MaxInFlight)
+	release := make(chan struct{})
+
+	var group sync.WaitGroup
+
+	for range receiver.MaxInFlight {
+		group.Go(func() {
+			req := httptest.NewRequestWithContext(
+				t.Context(),
+				http.MethodPost,
+				"/webhook",
+				&gateBody{started: started, release: release, once: sync.Once{}},
+			)
+			req.Header.Set(sigHeader, sign(testSecret, openedBody))
+			req.Header.Set(deliveryHeader, deliveryID)
+			req.Header.Set(eventHeader, pingEvent)
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+		})
+	}
+
+	for range receiver.MaxInFlight {
+		<-started
+	}
+
+	over := httptest.NewRecorder()
+	extra := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", strings.NewReader(openedBody))
+	extra.Header.Set(sigHeader, sign(testSecret, openedBody))
+	extra.Header.Set(deliveryHeader, deliveryID)
+	extra.Header.Set(eventHeader, pingEvent)
+	handler.ServeHTTP(over, extra)
+
+	if over.Code != http.StatusServiceUnavailable || over.Header().Get("Retry-After") == "" {
+		t.Errorf(
+			"over the limit: status %d, Retry-After %q, want 503 with Retry-After",
+			over.Code,
+			over.Header().Get("Retry-After"),
+		)
+	}
+
+	close(release)
+	group.Wait()
+
+	if got := postDelivery(t, handler); got != http.StatusAccepted {
+		t.Errorf("after the slots free: status %d, want 202", got)
 	}
 }
