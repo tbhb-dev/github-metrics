@@ -20,8 +20,11 @@ import (
 	"github.com/tbhb-dev/github-metrics/internal/store"
 )
 
-// MaxBody is GitHub's largest webhook payload, 25 MiB.
-const MaxBody = 25 << 20
+// MaxBody is the largest body the receiver reads, 2 MiB. The events this
+// service records are tens of kilobytes, and a sender can stream up to this
+// much before the signature check can reject it. GitHub sends payloads up to
+// 25 MiB, so a larger event of any kind gets 413.
+const MaxBody = 2 << 20
 
 const signaturePrefix = "sha256="
 
