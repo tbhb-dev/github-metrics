@@ -366,8 +366,10 @@ func TestSeriesStartAtZero(t *testing.T) {
 	}
 
 	before := collectCounters(t, reader)
-	if before["github.pr.merges"]["repository=tbhb-dev/github-metrics"] != 0 ||
-		len(before["github.check.conclusions"]) != 9 {
+
+	// A missing key also reads 0, so assert the merge series exists.
+	merges, seeded := before["github.pr.merges"]["repository=tbhb-dev/github-metrics"]
+	if !seeded || merges != 0 || len(before["github.check.conclusions"]) != 9 {
 		t.Fatalf("seeded repository counters = %v", before)
 	}
 
@@ -440,4 +442,135 @@ func collectCounters(t *testing.T, reader *sdkmetric.ManualReader) map[string]ma
 	}
 
 	return got
+}
+
+type mainRedStep struct {
+	action, checkName, conclusion, headBranch, defaultBranch string
+	wantValue                                                int64
+	wantRecorded                                             bool
+}
+
+func TestRecordMainRed(t *testing.T) {
+	t.Parallel()
+
+	const (
+		mainBranch      = "main"
+		conclusionCheck = "conclusion"
+		completedAction = "completed"
+		failureResult   = "failure"
+	)
+
+	for _, test := range []struct {
+		name  string
+		steps []mainRedStep
+	}{
+		{
+			"red on main",
+			[]mainRedStep{{completedAction, conclusionCheck, failureResult, mainBranch, mainBranch, 1, true}},
+		},
+		{
+			"timed out on main",
+			[]mainRedStep{{completedAction, conclusionCheck, "timed_out", mainBranch, mainBranch, 1, true}},
+		},
+		{
+			"later green on main",
+			[]mainRedStep{
+				{completedAction, conclusionCheck, failureResult, mainBranch, mainBranch, 1, true},
+				{completedAction, conclusionCheck, "success", mainBranch, mainBranch, 0, true},
+			},
+		},
+		{
+			"red on pull request branch",
+			[]mainRedStep{{completedAction, conclusionCheck, failureResult, "feat/pr", mainBranch, 0, false}},
+		},
+		{
+			"non-conclusion check",
+			[]mainRedStep{{completedAction, "build", failureResult, mainBranch, mainBranch, 0, false}},
+		},
+		{
+			"empty conclusion",
+			[]mainRedStep{{completedAction, conclusionCheck, "", mainBranch, mainBranch, 0, false}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			consumer, reader := newRecorder(t)
+
+			for _, step := range test.steps {
+				body, err := json.Marshal(map[string]any{
+					"repository": map[string]string{
+						"full_name":      repositoryName,
+						"default_branch": step.defaultBranch,
+					},
+					"action": step.action,
+					"check_run": map[string]any{
+						"name":        step.checkName,
+						"conclusion":  step.conclusion,
+						"check_suite": map[string]string{"head_branch": step.headBranch},
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				err = consumer.Record(t.Context(), checkRunEvent, body)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				checkMainRedGauge(t, reader, step.wantRecorded, step.wantValue)
+			}
+		})
+	}
+}
+
+func checkMainRedGauge(t *testing.T, reader *sdkmetric.ManualReader, wantRecorded bool, wantValue int64) {
+	t.Helper()
+
+	var data metricdata.ResourceMetrics
+
+	err := reader.Collect(t.Context(), &data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+
+	for _, scope := range data.ScopeMetrics {
+		for _, measurement := range scope.Metrics {
+			if measurement.Name != "github.main.red" {
+				continue
+			}
+
+			found = true
+
+			checkMainRedPoint(t, measurement, wantValue)
+		}
+	}
+
+	if found != wantRecorded {
+		t.Fatalf("github.main.red present = %v, want %v", found, wantRecorded)
+	}
+}
+
+func checkMainRedPoint(t *testing.T, measurement metricdata.Metrics, wantValue int64) {
+	t.Helper()
+
+	gauge, ok := measurement.Data.(metricdata.Gauge[int64])
+	if !ok || len(gauge.DataPoints) != 1 {
+		t.Fatalf("expected one int64 gauge point, got %v", measurement)
+	}
+
+	point := gauge.DataPoints[0]
+
+	attrs := make(map[string]string)
+	for _, attr := range point.Attributes.ToSlice() {
+		attrs[string(attr.Key)] = attr.Value.AsString()
+	}
+
+	wantAttrs := map[string]string{repositoryKey: repositoryName}
+	if !reflect.DeepEqual(attrs, wantAttrs) || point.Value != wantValue {
+		t.Fatalf("gauge = (%v, %d), want (%v, %d)", attrs, point.Value, wantAttrs, wantValue)
+	}
 }

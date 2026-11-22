@@ -16,17 +16,24 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/store"
 )
 
-// MaxBody is GitHub's largest webhook payload, 25 MiB.
-const MaxBody = 25 << 20
+// MaxBody is the largest body the receiver reads, 2 MiB. The events this
+// service records are tens of kilobytes, and a sender can stream up to this
+// much before the signature check can reject it. GitHub sends payloads up to
+// 25 MiB, so a larger event of any kind gets 413.
+const MaxBody = 2 << 20
 
 // MaxInFlight caps the deliveries whose bodies are being read at once. Each
 // can buffer up to MaxBody, so this bounds the receiver's body memory at
-// MaxInFlight times MaxBody, which is 400 MiB.
+// MaxInFlight times MaxBody, which is 32 MiB.
 const MaxInFlight = 16
+
+// busyWriteTimeout bounds the write of the 503 on a hijacked connection.
+const busyWriteTimeout = 5 * time.Second
 
 const signaturePrefix = "sha256="
 
@@ -190,6 +197,13 @@ func rejectBusy(resp http.ResponseWriter) {
 	}
 
 	defer func() { _ = conn.Close() }()
+
+	// Hijacking clears the connection's deadlines. A peer that doesn't read
+	// would block the write, so bound it.
+	err = conn.SetWriteDeadline(time.Now().Add(busyWriteTimeout))
+	if err != nil {
+		return
+	}
 
 	const busy = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
 

@@ -6,7 +6,7 @@
 | Trace retention is shorter than a PR's life | Early child spans age out before the root arrives | Set retention past the longest expected PR, and report orphans | Unverified |
 | The OTel Go SDK can't set chosen span IDs | The trace model needs another export path | A custom ID generator, with direct export to the collector as the fallback | Unverified |
 | The collector's log path differs from the plan | Logs don't reach Loki | The first export spike sends a log record and searches for it, with standard output as the fallback | Unverified |
-| A body of up to 25 MiB reaches the queue | Disk and queue size grow | Planned: spool to a bounded temporary file and verify the signature before the append, with a proposed cap of four bodies in flight | New |
+| A body of up to 2 MiB reaches the queue | Disk and queue size grow | Planned: spool to a bounded temporary file and verify the signature before the append, with a proposed cap of four bodies in flight | New |
 | Deleted bodies remain in the `bbolt` file | Raw bodies persist physically until `bbolt` reuses the pages, even after the queue marks them deleted | Proposed: mode `0600` and a dedicated volume. Whether to back up the queue is open, and plan step 6 decides it | Unverified |
 | The client stores an `ETag` on receipt | A 200 body the reconciler can't use leaves a stale tag | The planned reconciler clears the tag in that case | New |
 | `ETag` values change when the installation token rotates | Fewer free `304` answers | The worst-case budget already assumes every request returns a full response | New (appendix E) |
