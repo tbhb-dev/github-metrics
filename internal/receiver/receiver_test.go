@@ -5,17 +5,21 @@ package receiver_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
 	"github.com/tbhb-dev/github-metrics/internal/store"
@@ -509,6 +513,140 @@ func TestStoreErrorAnswers500(t *testing.T) {
 
 	if !strings.Contains(logs.String(), `"level":"ERROR"`) {
 		t.Errorf("log = %s, want an ERROR line", logs.String())
+	}
+}
+
+// gateBody signals on its first Read, then blocks until release closes.
+type gateBody struct {
+	started chan<- struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (g *gateBody) Read(_ []byte) (int, error) {
+	g.once.Do(func() { g.started <- struct{}{} })
+	<-g.release
+
+	return 0, io.EOF
+}
+
+// holdSlots starts MaxInFlight deliveries that block mid-body and returns once
+// all of them hold a slot. The returned function releases and waits for them.
+func holdSlots(t *testing.T, handler http.Handler) func() {
+	t.Helper()
+
+	started := make(chan struct{}, receiver.MaxInFlight)
+	release := make(chan struct{})
+
+	var group sync.WaitGroup
+
+	for range receiver.MaxInFlight {
+		group.Go(func() {
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook",
+				&gateBody{started: started, release: release, once: sync.Once{}})
+			req.Header.Set(sigHeader, sign(testSecret, openedBody))
+			req.Header.Set(deliveryHeader, deliveryID)
+			req.Header.Set(eventHeader, pingEvent)
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+		})
+	}
+
+	for range receiver.MaxInFlight {
+		<-started
+	}
+
+	return func() {
+		close(release)
+		group.Wait()
+	}
+}
+
+func TestInFlightLimit(t *testing.T) {
+	t.Parallel()
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+	free := holdSlots(t, handler)
+
+	over := httptest.NewRecorder()
+	extra := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", strings.NewReader(openedBody))
+	extra.Header.Set(sigHeader, sign(testSecret, openedBody))
+	extra.Header.Set(deliveryHeader, deliveryID)
+	extra.Header.Set(eventHeader, pingEvent)
+	handler.ServeHTTP(over, extra)
+
+	if over.Code != http.StatusServiceUnavailable || over.Header().Get("Retry-After") == "" {
+		t.Errorf(
+			"over the limit: status %d, Retry-After %q, want 503 with Retry-After",
+			over.Code,
+			over.Header().Get("Retry-After"),
+		)
+	}
+
+	if over.Header().Get("Connection") != "close" {
+		t.Errorf(
+			"over the limit: Connection %q, want close so the server doesn't drain the body",
+			over.Header().Get("Connection"),
+		)
+	}
+
+	free()
+
+	if got := postDelivery(t, handler); got != http.StatusAccepted {
+		t.Errorf("after the slots free: status %d, want 202", got)
+	}
+}
+
+// A rejected delivery's answer must not wait for its body, or slow rejected
+// bodies would read concurrently outside the limit.
+func TestInFlightRejectClosesConnection(t *testing.T) {
+	t.Parallel()
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+	srv := httptest.NewServer(handler)
+
+	t.Cleanup(srv.Close)
+
+	free := holdSlots(t, handler)
+	defer free()
+
+	for _, framing := range []string{"Content-Length: 1000", "Transfer-Encoding: chunked"} {
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+
+		conn, err := new(net.Dialer).DialContext(ctx, "tcp", srv.Listener.Addr().String())
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+
+		// Send the headers and a short piece of the body, then stop.
+		head := "POST /webhook HTTP/1.1\r\nHost: x\r\n" + framing + "\r\n" +
+			sigHeader + ": " + sign(testSecret, openedBody) + "\r\n" +
+			deliveryHeader + ": " + deliveryID + "\r\n" +
+			eventHeader + ": " + pingEvent + "\r\n\r\n"
+
+		_, err = conn.Write([]byte(head + "a"))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = conn.SetReadDeadline(time.Now().Add(time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// The server must answer 503 and then close, with the body unfinished.
+		answer, err := io.ReadAll(conn)
+		if err != nil {
+			t.Errorf("%s: connection stayed open after the 503: %v", framing, err)
+		}
+
+		if !strings.HasPrefix(string(answer), "HTTP/1.1 503 ") {
+			t.Errorf("%s: answer %q, want a 503", framing, answer)
+		}
+
+		_ = conn.Close()
+
+		cancel()
 	}
 }
 
