@@ -5,6 +5,7 @@ package receiver_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
 	"github.com/tbhb-dev/github-metrics/internal/store"
@@ -526,10 +528,11 @@ func (g *gateBody) Read(_ []byte) (int, error) {
 	return 0, io.EOF
 }
 
-func TestInFlightLimit(t *testing.T) {
-	t.Parallel()
+// holdSlots starts MaxInFlight deliveries that block mid-body and returns once
+// all of them hold a slot. The returned function releases and waits for them.
+func holdSlots(t *testing.T, handler http.Handler) func() {
+	t.Helper()
 
-	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
 	started := make(chan struct{}, receiver.MaxInFlight)
 	release := make(chan struct{})
 
@@ -537,12 +540,8 @@ func TestInFlightLimit(t *testing.T) {
 
 	for range receiver.MaxInFlight {
 		group.Go(func() {
-			req := httptest.NewRequestWithContext(
-				t.Context(),
-				http.MethodPost,
-				"/webhook",
-				&gateBody{started: started, release: release, once: sync.Once{}},
-			)
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook",
+				&gateBody{started: started, release: release, once: sync.Once{}})
 			req.Header.Set(sigHeader, sign(testSecret, openedBody))
 			req.Header.Set(deliveryHeader, deliveryID)
 			req.Header.Set(eventHeader, pingEvent)
@@ -553,6 +552,18 @@ func TestInFlightLimit(t *testing.T) {
 	for range receiver.MaxInFlight {
 		<-started
 	}
+
+	return func() {
+		close(release)
+		group.Wait()
+	}
+}
+
+func TestInFlightLimit(t *testing.T) {
+	t.Parallel()
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+	free := holdSlots(t, handler)
 
 	over := httptest.NewRecorder()
 	extra := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", strings.NewReader(openedBody))
@@ -569,10 +580,59 @@ func TestInFlightLimit(t *testing.T) {
 		)
 	}
 
-	close(release)
-	group.Wait()
+	if over.Header().Get("Connection") != "close" {
+		t.Errorf(
+			"over the limit: Connection %q, want close so the server doesn't drain the body",
+			over.Header().Get("Connection"),
+		)
+	}
+
+	free()
 
 	if got := postDelivery(t, handler); got != http.StatusAccepted {
 		t.Errorf("after the slots free: status %d, want 202", got)
 	}
+}
+
+// A rejected delivery's answer must not wait for its body, or slow rejected
+// bodies would read concurrently outside the limit.
+func TestInFlightRejectDoesNotWaitForBody(t *testing.T) {
+	t.Parallel()
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+	srv := httptest.NewServer(handler)
+
+	t.Cleanup(srv.Close)
+
+	free := holdSlots(t, handler)
+
+	// The body is a pipe that never closes, so the client sends it chunked.
+	pipeRead, pipeWrite := io.Pipe()
+
+	t.Cleanup(func() { _ = pipeWrite.Close() })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/webhook", pipeRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req.Header.Set(sigHeader, sign(testSecret, openedBody))
+	req.Header.Set(deliveryHeader, deliveryID)
+	req.Header.Set(eventHeader, pingEvent)
+
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("no answer before the body finished: %v", err)
+	}
+
+	_ = resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("status %d, want 503", resp.StatusCode)
+	}
+
+	free()
 }

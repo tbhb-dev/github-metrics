@@ -95,6 +95,9 @@ func webhook(
 	default:
 		log.WarnContext(req.Context(), "rejected delivery", "reason", "too many deliveries in flight")
 		resp.Header().Set("Retry-After", "5")
+		// Close the connection so the server doesn't drain the unread body
+		// outside the slot limit.
+		resp.Header().Set("Connection", "close")
 		resp.WriteHeader(http.StatusServiceUnavailable)
 
 		return
