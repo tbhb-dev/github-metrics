@@ -652,6 +652,8 @@ func TestInFlightRejectClosesConnection(t *testing.T) {
 	}
 }
 
+var errNoDeadline = errors.New("no deadline")
+
 // spyConn records what rejectBusy does to a hijacked connection.
 type spyConn struct {
 	net.Conn
@@ -668,7 +670,9 @@ func (c *spyConn) SetWriteDeadline(deadline time.Time) error {
 	return c.deadlineErr
 }
 
-func (c *spyConn) Write(data []byte) (int, error) { return c.written.Write(data) }
+func (c *spyConn) Write(data []byte) (int, error) {
+	return c.written.Write(data) //nolint:wrapcheck // a test double passes the buffer's result through
+}
 
 func (c *spyConn) Close() error {
 	c.closed = true
@@ -730,7 +734,8 @@ func TestInFlightRejectBoundsWrite(t *testing.T) {
 func TestInFlightRejectDeadlineFailure(t *testing.T) {
 	t.Parallel()
 
-	conn := &spyConn{deadlineErr: errors.New("no deadline")}
+	conn := new(spyConn)
+	conn.deadlineErr = errNoDeadline
 
 	serveBusy(t, conn)
 
