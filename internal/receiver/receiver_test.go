@@ -226,6 +226,8 @@ func TestWebhookHeaders(t *testing.T) {
 	}
 }
 
+const noDeliveryIDCase = "bad signature and no delivery id"
+
 func TestBadSignature(t *testing.T) {
 	t.Parallel()
 
@@ -233,25 +235,25 @@ func TestBadSignature(t *testing.T) {
 
 	good := sign(testSecret, body)
 	tests := map[string]string{
-		"bad signature and no delivery id": "", // set below
-		"first digest byte differs":        tamper(good, 0),
-		"last digest byte differs":         tamper(good, -1),
-		"digest truncated":                 good[:len(good)-2],
-		"digest extended":                  good + "00",
+		noDeliveryIDCase:            "", // set below
+		"first digest byte differs": tamper(good, 0),
+		"last digest byte differs":  tamper(good, -1),
+		"digest truncated":          good[:len(good)-2],
+		"digest extended":           good + "00",
 	}
-	tests["bad signature and no delivery id"] = sign("other", body)
+	tests[noDeliveryIDCase] = sign("other", body)
 
 	for name, signature := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
 			header := map[string]string{sigHeader: signature, eventHeader: pullRequestEvent}
-			if name != "bad signature and no delivery id" {
+			if name != noDeliveryIDCase {
 				header[deliveryHeader] = deliveryID
 			}
 
 			want := http.StatusUnauthorized
-			if name == "bad signature and no delivery id" {
+			if name == noDeliveryIDCase {
 				// Header shape is checked before authentication, so no body is read.
 				want = http.StatusBadRequest
 			}
@@ -358,27 +360,32 @@ func TestWebhookEarlyRejectReadsNoBody(t *testing.T) {
 	for _, spec := range tests {
 		t.Run(spec.name, func(t *testing.T) {
 			t.Parallel()
-
-			var bodyReader io.Reader = failReader{t: t}
-			if spec.body != "" {
-				bodyReader = strings.NewReader(spec.body)
-			}
-
-			handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
-			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", bodyReader)
-			req.ContentLength = spec.contentLength
-
-			for name, value := range spec.header {
-				req.Header.Set(name, value)
-			}
-
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != spec.want {
-				t.Errorf("status = %d, want %d", rec.Code, spec.want)
-			}
+			runEarlyReject(t, spec.header, spec.body, spec.contentLength, spec.want)
 		})
+	}
+}
+
+func runEarlyReject(t *testing.T, header map[string]string, body string, contentLength int64, want int) {
+	t.Helper()
+
+	var bodyReader io.Reader = failReader{t: t}
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", bodyReader)
+	req.ContentLength = contentLength
+
+	for name, value := range header {
+		req.Header.Set(name, value)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != want {
+		t.Errorf("status = %d, want %d", rec.Code, want)
 	}
 }
 
