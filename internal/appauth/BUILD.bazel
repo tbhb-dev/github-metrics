@@ -15,7 +15,12 @@ go_library(
 
 go_test(
     name = "appauth_test",
-    srcs = ["appauth_test.go"],
+    srcs = [
+        "appauth_test.go",
+        "concurrent_test.go",
+        "failure_test.go",
+        "transport_test.go",
+    ],
     visibility = ["//:__pkg__"],
     deps = [
         ":appauth",
