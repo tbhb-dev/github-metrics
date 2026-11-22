@@ -20,6 +20,15 @@ import (
 type Recorder struct {
 	events, merges, conclusions, dropped metric.Int64Counter
 	cycleTime                            metric.Float64Histogram
+	mainRed                              metric.Int64Gauge
+}
+
+type checkRun struct {
+	Name       string `json:"name"`
+	Conclusion string `json:"conclusion"`
+	CheckSuite struct {
+		HeadBranch string `json:"head_branch"` //nolint:tagliatelle // GitHub uses this field name.
+	} `json:"check_suite"` //nolint:tagliatelle // GitHub uses this field name.
 }
 
 type pullRequest struct {
@@ -69,6 +78,11 @@ func New(meter metric.Meter) (*Recorder, error) {
 		return nil, fmt.Errorf("create github.pr.cycle_time histogram: %w", err)
 	}
 
+	recorder.mainRed, err = meter.Int64Gauge("github.main.red")
+	if err != nil {
+		return nil, fmt.Errorf("create github.main.red gauge: %w", err)
+	}
+
 	return &recorder, nil
 }
 
@@ -82,13 +96,11 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 
 	var delivery struct {
 		Repository struct {
-			FullName string `json:"full_name"` //nolint:tagliatelle // GitHub uses this field name.
+			FullName      string `json:"full_name"`      //nolint:tagliatelle // GitHub uses this field name.
+			DefaultBranch string `json:"default_branch"` //nolint:tagliatelle // GitHub uses this field name.
 		} `json:"repository"`
-		Action   string `json:"action"`
-		CheckRun struct {
-			Name       string `json:"name"`
-			Conclusion string `json:"conclusion"`
-		} `json:"check_run"` //nolint:tagliatelle // GitHub uses this field name.
+		Action      string      `json:"action"`
+		CheckRun    checkRun    `json:"check_run"`    //nolint:tagliatelle // GitHub uses this field name.
 		PullRequest pullRequest `json:"pull_request"` //nolint:tagliatelle // GitHub uses this field name.
 	}
 
@@ -121,27 +133,45 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 	}
 
 	if event == "check_run" {
-		r.recordCheckRun(ctx, repo, delivery.Action, delivery.CheckRun.Name, delivery.CheckRun.Conclusion)
+		r.recordCheckRun(ctx, repo, delivery.Action, delivery.Repository.DefaultBranch, delivery.CheckRun)
 	}
 
 	return nil
 }
 
-func (r *Recorder) recordCheckRun(ctx context.Context, repo attribute.KeyValue, action, name, conclusion string) {
-	checkName := attribute.String("check_name", name)
+func (r *Recorder) recordCheckRun(
+	ctx context.Context, repo attribute.KeyValue, action, defaultBranch string, run checkRun,
+) {
+	const conclusion = "conclusion"
+
+	checkName := attribute.String("check_name", run.Name)
 
 	for _, known := range []string{
 		"success", "failure", "cancelled", "skipped", "neutral",
 		"timed_out", "action_required", "stale", "startup_failure",
 	} {
 		r.conclusions.Add(ctx, 0, metric.WithAttributes(repo, checkName,
-			attribute.String("conclusion", known)))
+			attribute.String(conclusion, known)))
 	}
 
-	if action == "completed" {
-		r.conclusions.Add(ctx, 1, metric.WithAttributes(repo, checkName,
-			attribute.String("conclusion", conclusion)))
+	if action != "completed" {
+		return
 	}
+
+	r.conclusions.Add(ctx, 1, metric.WithAttributes(repo, checkName,
+		attribute.String(conclusion, run.Conclusion)))
+
+	if run.Name != conclusion || run.Conclusion == "" ||
+		defaultBranch == "" || run.CheckSuite.HeadBranch != defaultBranch {
+		return
+	}
+
+	var red int64
+	if run.Conclusion == "failure" || run.Conclusion == "timed_out" {
+		red = 1
+	}
+
+	r.mainRed.Record(ctx, red, metric.WithAttributes(repo))
 }
 
 func (r *Recorder) recordCycleTime(ctx context.Context, repo attribute.KeyValue, request pullRequest) {
