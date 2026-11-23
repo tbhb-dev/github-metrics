@@ -5,9 +5,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -139,5 +143,131 @@ func TestNewRecorderWithEndpoint(t *testing.T) {
 
 	if measurement.Name != "github.events" || !ok || len(sum.DataPoints) != 1 || sum.DataPoints[0].Value != 1 {
 		t.Fatalf("metric = %v, want one github.events observation", measurement)
+	}
+}
+
+func TestRunWithoutReconciler(t *testing.T) {
+	for _, name := range []string{appIDEnv, installationIDEnv, appKeyFileEnv, apiURLEnv, "OTEL_EXPORTER_OTLP_ENDPOINT"} {
+		t.Setenv(name, "")
+	}
+
+	dir := t.TempDir()
+	secretFile := filepath.Join(dir, "secret")
+	t.Setenv("WEBHOOK_SECRET_FILE", secretFile)
+	t.Setenv("STORE_FILE", filepath.Join(dir, "store.db"))
+
+	err := os.WriteFile(secretFile, []byte("test secret"), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	address := httptest.NewUnstartedServer(nil)
+	addr := address.Listener.Addr().String()
+	address.Close()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	var logs bytes.Buffer
+
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	done := make(chan error, 1)
+
+	go func() { done <- run(ctx, addr, log) }()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for probe(addr) != 0 {
+		select {
+		case err = <-done:
+			t.Fatalf("service exited before it was healthy: %v", err)
+		case <-ctx.Done():
+			t.Fatalf("service did not become healthy, shutdown error = %v", <-done)
+		case <-ticker.C:
+		}
+	}
+
+	cancel()
+
+	err = <-done
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if bytes.Count(logs.Bytes(), []byte(`"level":"INFO","msg":"reconciler disabled"`)) != 1 {
+		t.Fatalf("want one INFO line for the disabled reconciler, got %s", logs.String())
+	}
+}
+
+func TestReconcilerConfigDisabled(t *testing.T) {
+	t.Parallel()
+
+	env := map[string]string{apiURLEnv: defaultGitHubAPI}
+
+	var disabled reconcileConfig
+
+	cfg, err := reconcilerConfig(func(name string) string { return env[name] })
+	if err != nil || cfg != disabled {
+		t.Fatalf("want disabled configuration, got error %v", err)
+	}
+}
+
+func TestReconcilerConfigPartial(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct{ set, missing string }{
+		{appIDEnv, installationIDEnv + ", " + appKeyFileEnv},
+		{installationIDEnv, appIDEnv + ", " + appKeyFileEnv},
+		{appKeyFileEnv, appIDEnv + ", " + installationIDEnv},
+	} {
+		env := map[string]string{test.set: "test private value"}
+		want := errMissingReconcilerConfig.Error() + ": " + test.missing
+
+		_, err := reconcilerConfig(func(name string) string { return env[name] })
+		if !errors.Is(err, errMissingReconcilerConfig) || err.Error() != want {
+			t.Errorf("with %s set, want an error naming only %s", test.set, test.missing)
+		}
+	}
+}
+
+func TestReconcilerConfigInvalidIDs(t *testing.T) {
+	t.Parallel()
+
+	const invalid = "test private value"
+
+	for name, want := range map[string]error{appIDEnv: errInvalidAppID, installationIDEnv: errInvalidInstallationID} {
+		env := map[string]string{appIDEnv: "1", installationIDEnv: "2", appKeyFileEnv: "test-key.pem"}
+		env[name] = invalid
+
+		_, err := reconcilerConfig(func(name string) string { return env[name] })
+		if !errors.Is(err, want) || err.Error() != want.Error() {
+			t.Errorf("want an error naming %s without its value", name)
+		}
+	}
+}
+
+func TestReconcilerConfigComplete(t *testing.T) {
+	t.Parallel()
+
+	const keyFile = "test-key.pem"
+
+	for _, apiURL := range []string{"", defaultGitHubAPI + "/api/v3"} {
+		env := map[string]string{appIDEnv: "1", installationIDEnv: "2", appKeyFileEnv: keyFile, apiURLEnv: apiURL}
+
+		cfg, err := reconcilerConfig(func(name string) string { return env[name] })
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		wantURL := apiURL
+		if wantURL == "" {
+			wantURL = defaultGitHubAPI
+		}
+
+		want := reconcileConfig{keyFile: keyFile, apiURL: wantURL, appID: 1, installationID: 2}
+		if cfg != want {
+			t.Fatalf("config = %+v, want %+v", cfg, want)
+		}
 	}
 }
