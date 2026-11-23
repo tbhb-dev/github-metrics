@@ -32,10 +32,19 @@ const MaxBody = 2 << 20
 // MaxInFlight times MaxBody, which is 32 MiB.
 const MaxInFlight = 16
 
+// slotWait gives a burst time to clear within GitHub's delivery timeout.
+const slotWait = 8 * time.Second
+
 // busyWriteTimeout bounds the write of the 503 on a hijacked connection.
 const busyWriteTimeout = 5 * time.Second
 
-const signaturePrefix = "sha256="
+const (
+	signaturePrefix  = "sha256="
+	rejectedDelivery = "rejected delivery"
+	reasonKey        = "reason"
+	deliveryKey      = "delivery"
+	eventKey         = "event"
+)
 
 // The signature covers only the body, so both headers need their own check.
 // Event names are lowercase and can hold digits, as in projects_v2.
@@ -45,9 +54,9 @@ var (
 )
 
 // Handler serves GET /healthz and POST /webhook. Every other request, and a
-// non-POST request to /webhook, gets 404. A delivery that arrives while
-// MaxInFlight others are being read gets 503 with Retry-After. It dispatches on the exact method
-// and path, with no path cleaning, so "//webhook" is a 404 and not a redirect.
+// non-POST request to /webhook, gets 404. A delivery waits up to slotWait for
+// a free slot before getting 503 with Retry-After. The handler uses the exact
+// method and path, so "//webhook" gets 404.
 func Handler(secret []byte, repo store.Store, log *slog.Logger) http.Handler {
 	slots := make(chan struct{}, MaxInFlight)
 
@@ -79,12 +88,12 @@ func webhook(
 		return
 	}
 
-	event := req.Header.Get("X-Github-Event")
+	event, delivery := req.Header.Get("X-Github-Event"), req.Header.Get("X-Github-Delivery")
 
-	delivery := req.Header.Get("X-Github-Delivery")
+	ctx := req.Context()
 
 	if !deliveryPattern.MatchString(delivery) || !eventPattern.MatchString(event) {
-		log.WarnContext(req.Context(), "rejected delivery", "reason", "bad delivery or event header")
+		log.WarnContext(ctx, rejectedDelivery, reasonKey, "bad delivery or event header")
 		resp.WriteHeader(http.StatusBadRequest)
 
 		return
@@ -96,13 +105,26 @@ func webhook(
 		return
 	}
 
+	timer := time.NewTimer(slotWait)
+	defer timer.Stop()
+
 	select {
 	case slots <- struct{}{}:
 		defer func() { <-slots }()
-	default:
-		log.WarnContext(req.Context(), "rejected delivery", "reason", "too many deliveries in flight")
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+		log.ErrorContext(ctx, rejectedDelivery,
+			reasonKey, "no free slot after wait",
+			deliveryKey, oneLine(delivery),
+			eventKey, oneLine(event))
 		rejectBusy(resp)
 
+		return
+	}
+
+	// A slot can open as the request is canceled.
+	if ctx.Err() != nil {
 		return
 	}
 
@@ -132,9 +154,9 @@ func webhook(
 
 	outcome, err := repo.Enqueue(delivery, event, body.Bytes())
 	if err != nil {
-		log.ErrorContext(req.Context(), "enqueue delivery",
-			"delivery", oneLine(delivery),
-			"event", oneLine(event),
+		log.ErrorContext(ctx, "enqueue delivery",
+			deliveryKey, oneLine(delivery),
+			eventKey, oneLine(event),
 			"error", err)
 		resp.WriteHeader(http.StatusInternalServerError)
 
@@ -146,9 +168,9 @@ func webhook(
 		result = "duplicate"
 	}
 
-	log.InfoContext(req.Context(), "accepted delivery",
-		"delivery", delivery,
-		"event", event,
+	log.InfoContext(ctx, "accepted delivery",
+		deliveryKey, oneLine(delivery),
+		eventKey, oneLine(event),
 		"bytes", size,
 		"outcome", result)
 	resp.WriteHeader(http.StatusAccepted)
@@ -161,7 +183,7 @@ func oneLine(s string) string {
 }
 
 func reject(resp http.ResponseWriter, req *http.Request, log *slog.Logger) {
-	log.WarnContext(req.Context(), "rejected delivery", "reason", "bad signature")
+	log.WarnContext(req.Context(), rejectedDelivery, reasonKey, "bad signature")
 	resp.WriteHeader(http.StatusUnauthorized)
 }
 
