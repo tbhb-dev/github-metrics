@@ -4,7 +4,9 @@
 package deploy_test
 
 import (
+	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -547,6 +549,72 @@ func TestTunnelServiceSettings(t *testing.T) {
 	for _, banned := range []string{"ports:", "network_mode", "TUNNEL_TOKEN"} {
 		if strings.Contains(composeText(t), banned) {
 			t.Errorf("compose.yaml contains %q", banned)
+		}
+	}
+}
+
+func TestComposeServiceLogging(t *testing.T) {
+	t.Parallel()
+
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skip("Docker is not installed")
+	}
+
+	version, versionErr := exec.CommandContext(t.Context(), docker, "compose", "version").CombinedOutput()
+	if versionErr != nil {
+		t.Skipf("Docker Compose is unavailable: %v: %s", versionErr, version)
+	}
+
+	resolverPath := filepath.Join(t.TempDir(), resolverFile)
+	writeFixture(t, resolverPath, "", 0o600)
+
+	cmd := exec.CommandContext(t.Context(), docker, "compose", envFile, os.DevNull, "config", "--format", "json")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"GITHUB_METRICS_IMAGE=" + digest,
+		"METRICS_NETWORK=metrics",
+		"RECEIVER_RESOLV_CONF=" + resolverPath,
+	}
+
+	var stderr strings.Builder
+
+	cmd.Stderr = &stderr
+
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("compose config: %v: %s", err, stderr.String())
+	}
+
+	var config struct {
+		Services map[string]struct {
+			Logging struct {
+				Options map[string]string `json:"options"`
+				Driver  string            `json:"driver"`
+			} `json:"logging"`
+		} `json:"services"`
+	}
+
+	decodeErr := json.Unmarshal(out, &config)
+	if decodeErr != nil {
+		t.Fatalf("decode Compose configuration: %v", decodeErr)
+	}
+
+	wantOptions := map[string]string{
+		"labels":   "com.docker.compose.project,com.docker.compose.service",
+		"max-size": "10m",
+		"max-file": "3",
+	}
+
+	for _, service := range []string{"receiver", "tunnel"} {
+		logging := config.Services[service].Logging
+		if logging.Driver != "json-file" {
+			t.Errorf("%s logging driver = %q, want json-file", service, logging.Driver)
+		}
+
+		if !maps.Equal(logging.Options, wantOptions) {
+			t.Errorf("%s logging options = %v, want %v", service, logging.Options, wantOptions)
 		}
 	}
 }

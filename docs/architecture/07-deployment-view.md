@@ -13,6 +13,8 @@ The target deployment runs two containers on the production container host: the 
 | Shutdown | On `SIGTERM`, within 20 seconds the receiver stops accepting requests and the worker finishes its current PR. Then the meter provider flushes and the store closes |
 | Delivery | The repository publishes the image and a Compose file. The host operator deploys them |
 
+The host log collector reads Docker's `json-file` logs and labels them by Compose project and service. The receiver and tunnel use this driver and rotate their logs at 10 MB, keeping up to three files per container.
+
 ## Secret files
 
 Keep secret contents out of images, environment variables, and logs. Git ignores `deploy/secrets/`.
