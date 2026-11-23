@@ -216,27 +216,51 @@ func TestRecordClosedFirstEndKeepsItsState(t *testing.T) {
 	}
 }
 
-func TestRecordReopenedClaimsEnded(t *testing.T) {
+func TestRecordReopened(t *testing.T) {
 	t.Parallel()
 
-	consumer, reader := newRecorderWith(t, newLedger(nil))
-	reopened := `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"reopened",` +
-		`"pull_request":{"node_id":"PR_1","created_at":"2026-11-15T12:00:00Z"}}`
-	merged := `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"closed","pull_request":{` +
-		`"node_id":"PR_1","merged":true,"created_at":"2026-11-15T12:00:00Z",` +
-		`"merged_at":"2026-11-15T13:00:00Z","closed_at":"2026-11-15T13:00:00Z"}}`
+	const (
+		fresh = "2026-11-15T12:00:00Z"
+		first = `,"closed_at":"2026-11-15T12:30:00Z"`
+		merge = `,"merged":true,"merged_at":"2026-11-15T13:00:00Z","closed_at":"2026-11-15T13:00:00Z"`
+	)
 
-	for _, body := range []string{reopened, merged} {
-		err := consumer.Record(t.Context(), pullRequestEvent, []byte(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	reopen := [2]string{"reopened", ""}
+	firstClose := [2]string{closedState, first}
+	mergeClose := [2]string{closedState, merge}
 
-	// The reopen proves a first close already ended, so the later merge adds no second cycle time.
-	merges, cycles := observations(t, reader)
-	if merges != 1 || len(cycles) != 0 {
-		t.Fatalf("merges %d, cycle states %v; want 1 and none", merges, cycles)
+	for _, test := range []struct {
+		name       string
+		created    string
+		steps      [][2]string // action and the rest of the pull_request body
+		wantCycles int
+	}{
+		// An earlier version may have counted this first close, so the reopen blocks a second count.
+		{"created before the store", "2026-10-20T12:00:00Z", [][2]string{reopen, mergeClose}, 0},
+		// This version counts the first close in any delivery order.
+		{"reopen before the first close", fresh, [][2]string{reopen, firstClose, mergeClose}, 1},
+		{"first close before the reopen", fresh, [][2]string{firstClose, reopen, mergeClose}, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			consumer, reader := newRecorderWith(t, newLedger(nil))
+
+			for _, step := range test.steps {
+				body := `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"` + step[0] +
+					`","pull_request":{"node_id":"PR_1","created_at":"` + test.created + `"` + step[1] + `}}`
+
+				err := consumer.Record(t.Context(), pullRequestEvent, []byte(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			merges, cycles := observations(t, reader)
+			if merges != 1 || len(cycles) != test.wantCycles {
+				t.Fatalf("merges %d, cycle states %v; want 1 merge and %d cycle times", merges, cycles, test.wantCycles)
+			}
+		})
 	}
 }
 

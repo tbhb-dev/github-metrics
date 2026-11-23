@@ -198,7 +198,7 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 }
 
 // RecordClosed counts the merge and the first end of a closed PR once each,
-// across the webhook and repair paths. A claim error records nothing for that
+// across deliveries. A claim error records nothing for that
 // milestone and returns the error, so the caller retries.
 func (r *Recorder) RecordClosed(ctx context.Context, closed ClosedPR) (Outcome, error) {
 	var (
@@ -225,15 +225,21 @@ func (r *Recorder) RecordClosed(ctx context.Context, closed ClosedPR) (Outcome, 
 	return out, err
 }
 
-// recordPullRequest handles a closed or reopened delivery. A reopen proves the
-// PR already ended once, so it claims the `ended` milestone without counting.
-// Otherwise a later merge would count a second cycle time for a first close
-// that an earlier version of the service already counted.
+// recordPullRequest handles a closed or reopened delivery. A PR created before
+// the store existed may have had its first close counted by an earlier version
+// of the service, so its reopen claims the `ended` milestone without counting,
+// and a later merge adds no second cycle time. A PR created after the store
+// existed has its first close counted by this version, however the deliveries
+// are ordered, so its reopen claims nothing.
 func (r *Recorder) recordPullRequest(ctx context.Context, repository, action string, request pullRequest) error {
 	if action == actionClosed {
 		_, err := r.RecordClosed(ctx, closedFromWebhook(repository, request))
 
 		return err
+	}
+
+	if parseTime(request.CreatedAt).After(r.ledger.Created()) {
+		return nil
 	}
 
 	_, err := r.ledger.ClaimMilestone(request.NodeID + "\x00ended")
