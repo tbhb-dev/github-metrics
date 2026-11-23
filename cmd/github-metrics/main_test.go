@@ -18,7 +18,6 @@ import (
 type stubLedger struct{}
 
 func (stubLedger) Created() time.Time                  { return time.Time{} }
-func (stubLedger) RepairFloor() (time.Time, error)     { return time.Time{}, nil }
 func (stubLedger) ClaimMilestone(string) (bool, error) { return true, nil }
 
 func TestNewRecorderWithoutLedger(t *testing.T) {

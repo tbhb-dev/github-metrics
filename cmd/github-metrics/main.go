@@ -111,17 +111,6 @@ func run(addr string, log *slog.Logger) error {
 
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 
-	// Reading the floor stamps it on the first start and applies a reset flag.
-	floor, err := repo.RepairFloor()
-	if err != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-
-		return errors.Join(fmt.Errorf("read repair floor: %w", err), shutdownTelemetry(shutdownCtx), repo.Close())
-	}
-
-	log.InfoContext(ctx, "repair floor", "floor", floor)
-
 	consumer, err := newRecorder(endpoint, meter, repo)
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)

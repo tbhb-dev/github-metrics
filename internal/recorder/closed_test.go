@@ -27,12 +27,11 @@ func storeCreated() time.Time { return time.Date(2026, 11, 1, 0, 0, 0, 0, time.U
 func clockNow() time.Time { return time.Date(2026, 11, 15, 14, 0, 0, 0, time.UTC) }
 
 type fakeLedger struct {
-	created, floor time.Time
-	claimErr       error
-	onClaim        func()
-	claimed        map[string]bool
-	claims         []string
-	floorCalls     int
+	created  time.Time
+	claimErr error
+	onClaim  func()
+	claimed  map[string]bool
+	claims   []string
 }
 
 func newLedger(adjust func(*fakeLedger)) *fakeLedger {
@@ -48,12 +47,6 @@ func newLedger(adjust func(*fakeLedger)) *fakeLedger {
 }
 
 func (f *fakeLedger) Created() time.Time { return f.created }
-
-func (f *fakeLedger) RepairFloor() (time.Time, error) {
-	f.floorCalls++
-
-	return f.floor, nil
-}
 
 func (f *fakeLedger) ClaimMilestone(key string) (bool, error) {
 	if f.onClaim != nil {
@@ -141,11 +134,6 @@ func TestRecordClosed(t *testing.T) {
 
 	recorded := recorder.Outcome{Merged: recorder.ResultRecorded, Ended: recorder.ResultRecorded}
 	tooOld := recorder.Outcome{Merged: recorder.ResultTooOld, Ended: recorder.ResultTooOld}
-	preFloor := recorder.Outcome{Merged: recorder.ResultPreFloor, Ended: recorder.ResultPreFloor}
-	repair := func(closed *recorder.ClosedPR) { closed.Repair = true }
-	floorAt := func(ago time.Duration) func(*fakeLedger) {
-		return func(l *fakeLedger) { l.floor = clockNow().Add(-ago) }
-	}
 
 	for _, test := range []struct {
 		name       string
@@ -154,19 +142,15 @@ func TestRecordClosed(t *testing.T) {
 		want       recorder.Outcome
 		wantMerges int64
 		wantCycles int
-		wantFloor  int
 	}{
-		{"claim then recorded", nil, nil, recorded, 1, 1, 0},
+		{"claim then recorded", nil, nil, recorded, 1, 1},
 		{"too old by age", func(closed *recorder.ClosedPR) {
 			old := clockNow().Add(-25 * time.Hour)
 			closed.CreatedAt, closed.MergedAt, closed.EndedAt = old.Add(-time.Hour), old, old
-		}, nil, tooOld, 0, 0, 0},
+		}, nil, tooOld, 0, 0},
 		{"too old by creation time", nil, func(l *fakeLedger) {
 			l.created = clockNow().Add(-30 * time.Minute)
-		}, tooOld, 0, 0, 0},
-		{"repair before the floor", repair, floorAt(30 * time.Minute), preFloor, 0, 0, 2},
-		{"repair after the floor", repair, floorAt(2 * time.Hour), recorded, 1, 1, 2},
-		{"webhook ignores the floor", nil, floorAt(30 * time.Minute), recorded, 1, 1, 0},
+		}, tooOld, 0, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -182,30 +166,11 @@ func TestRecordClosed(t *testing.T) {
 			// Every case claims both milestones, with or without an observation.
 			merges, cycles := observations(t, reader)
 			if got != test.want || len(ledger.claims) != 2 || merges != test.wantMerges ||
-				len(cycles) != test.wantCycles || ledger.floorCalls != test.wantFloor {
-				t.Fatalf("outcome %v, claims %d, merges %d, cycles %d, floor reads %d; want %v, 2, %d, %d, %d",
-					got, len(ledger.claims), merges, len(cycles), ledger.floorCalls,
-					test.want, test.wantMerges, test.wantCycles, test.wantFloor)
+				len(cycles) != test.wantCycles {
+				t.Fatalf("outcome %v, claims %d, merges %d, cycles %d; want %v, 2, %d, %d",
+					got, len(ledger.claims), merges, len(cycles), test.want, test.wantMerges, test.wantCycles)
 			}
 		})
-	}
-}
-
-func TestRecordClosedSecondDelivery(t *testing.T) {
-	t.Parallel()
-
-	consumer, reader := newRecorderWith(t, newLedger(nil))
-
-	for _, want := range []recorder.Result{recorder.ResultRecorded, recorder.ResultAlreadyCounted} {
-		got, err := consumer.RecordClosed(t.Context(), closedPR(nil))
-		if err != nil || got.Merged != want || got.Ended != want {
-			t.Fatalf("outcome = %v, %v; want %s", got, err, want)
-		}
-	}
-
-	merges, cycles := observations(t, reader)
-	if merges != 1 || len(cycles) != 1 {
-		t.Fatalf("merges %d, cycles %d; want one each", merges, len(cycles))
 	}
 }
 
@@ -248,6 +213,30 @@ func TestRecordClosedFirstEndKeepsItsState(t *testing.T) {
 	merges, cycles := observations(t, reader)
 	if merges != 1 || len(cycles) != 1 || cycles[0] != closedState {
 		t.Fatalf("merges %d, cycle states %v; want 1 and [closed]", merges, cycles)
+	}
+}
+
+func TestRecordReopenedClaimsEnded(t *testing.T) {
+	t.Parallel()
+
+	consumer, reader := newRecorderWith(t, newLedger(nil))
+	reopened := `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"reopened",` +
+		`"pull_request":{"node_id":"PR_1","created_at":"2026-11-15T12:00:00Z"}}`
+	merged := `{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"closed","pull_request":{` +
+		`"node_id":"PR_1","merged":true,"created_at":"2026-11-15T12:00:00Z",` +
+		`"merged_at":"2026-11-15T13:00:00Z","closed_at":"2026-11-15T13:00:00Z"}}`
+
+	for _, body := range []string{reopened, merged} {
+		err := consumer.Record(t.Context(), pullRequestEvent, []byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The reopen proves a first close already ended, so the later merge adds no second cycle time.
+	merges, cycles := observations(t, reader)
+	if merges != 1 || len(cycles) != 0 {
+		t.Fatalf("merges %d, cycle states %v; want 1 and none", merges, cycles)
 	}
 }
 
