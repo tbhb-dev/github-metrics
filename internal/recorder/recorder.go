@@ -20,7 +20,11 @@ import (
 // maxAge is how old a milestone may be and still count, as appendix A step 5 says.
 const maxAge = 24 * time.Hour
 
-const actionClosed = "closed"
+const (
+	actionClosed    = "closed"
+	milestoneMerged = "merged"
+	milestoneEnded  = "ended"
+)
 
 // ErrNoLedger means New got no ledger to claim milestones in.
 var ErrNoLedger = errors.New("recorder needs a ledger")
@@ -30,6 +34,8 @@ var ErrNoLedger = errors.New("recorder needs a ledger")
 type Ledger interface {
 	// Created returns the time of the store's first open.
 	Created() time.Time
+	// RepairFloor returns the time of the claiming recorder's first start.
+	RepairFloor() (time.Time, error)
 	// ClaimMilestone returns true and keeps the key when it was absent.
 	ClaimMilestone(key string) (bool, error)
 }
@@ -40,6 +46,7 @@ type Result string
 // The results of one milestone.
 const (
 	ResultTooOld         Result = "too_old"
+	ResultPreFloor       Result = "pre_floor"
 	ResultAlreadyCounted Result = "already_counted"
 	ResultRecorded       Result = "recorded"
 )
@@ -56,6 +63,7 @@ type ClosedPR struct {
 	// EndedState is "merged" or "closed" and picks the cycle time series.
 	EndedState string
 	Merged     bool
+	Repair     bool
 }
 
 // Recorder counts events without recording webhook text in attributes.
@@ -197,9 +205,15 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 	return nil
 }
 
-// RecordClosed counts the merge and the first end of a closed PR once each,
-// across deliveries. A claim error records nothing for that
-// milestone and returns the error, so the caller retries.
+// RecordClosed counts the merge and the first end of a closed PR once each.
+// A milestone at least 24 hours old or at or before the store's creation time
+// is claimed without recording and returns ResultTooOld.
+// For a repair, an otherwise eligible milestone at or before the repair floor
+// returns ResultPreFloor without recording. The repair claims ended to guard
+// against a second cycle time after a reopen, and leaves merged unclaimed so
+// a queued webhook can still count the merge. Webhook closes ignore the floor.
+// A floor read or claim error returns before recording the milestone, so the
+// caller can retry.
 func (r *Recorder) RecordClosed(ctx context.Context, closed ClosedPR) (Outcome, error) {
 	var (
 		out Outcome
@@ -209,7 +223,7 @@ func (r *Recorder) RecordClosed(ctx context.Context, closed ClosedPR) (Outcome, 
 	repo := attribute.String("repository", closed.Repository)
 
 	if closed.Merged && !closed.MergedAt.IsZero() {
-		out.Merged, err = r.milestone(closed, "merged", closed.MergedAt, func() {
+		out.Merged, err = r.milestone(closed, milestoneMerged, closed.MergedAt, func() {
 			r.merges.Add(ctx, 0, metric.WithAttributes(repo))
 			r.merges.Add(ctx, 1, metric.WithAttributes(repo))
 		})
@@ -219,18 +233,20 @@ func (r *Recorder) RecordClosed(ctx context.Context, closed ClosedPR) (Outcome, 
 	}
 
 	if !closed.EndedAt.IsZero() && !closed.CreatedAt.IsZero() {
-		out.Ended, err = r.milestone(closed, "ended", closed.EndedAt, func() { r.recordCycleTime(ctx, repo, closed) })
+		out.Ended, err = r.milestone(
+			closed,
+			milestoneEnded,
+			closed.EndedAt,
+			func() { r.recordCycleTime(ctx, repo, closed) },
+		)
 	}
 
 	return out, err
 }
 
-// recordPullRequest handles a closed or reopened delivery. A PR created before
-// the store existed may have had its first close counted by an earlier version
-// of the service, so its reopen claims the `ended` milestone without counting,
-// and a later merge adds no second cycle time. A PR created after the store
-// existed has its first close counted by this version, however the deliveries
-// are ordered, so its reopen claims nothing.
+// recordPullRequest handles a closed or reopened delivery. For a PR created
+// at or before the repair floor, a reopen claims ended to guard against
+// counting a first close the old recorder may already have counted.
 func (r *Recorder) recordPullRequest(ctx context.Context, repository, action string, request pullRequest) error {
 	if action == actionClosed {
 		_, err := r.RecordClosed(ctx, closedFromWebhook(repository, request))
@@ -238,11 +254,16 @@ func (r *Recorder) recordPullRequest(ctx context.Context, repository, action str
 		return err
 	}
 
-	if parseTime(request.CreatedAt).After(r.ledger.Created()) {
+	floor, err := r.ledger.RepairFloor()
+	if err != nil {
+		return fmt.Errorf("read repair floor: %w", err)
+	}
+
+	if parseTime(request.CreatedAt).After(floor) {
 		return nil
 	}
 
-	_, err := r.ledger.ClaimMilestone(request.NodeID + "\x00ended")
+	_, err = r.ledger.ClaimMilestone(request.NodeID + "\x00" + milestoneEnded)
 	if err != nil {
 		return fmt.Errorf("claim ended milestone: %w", err)
 	}
@@ -311,17 +332,34 @@ func parseTime(text string) time.Time {
 // milestone applies the eligibility rule to one milestone time, claims it, and
 // calls record only after a true claim.
 func (r *Recorder) milestone(closed ClosedPR, name string, when time.Time, record func()) (Result, error) {
-	key := closed.NodeID + "\x00" + name
-	skip := r.now().Sub(when) >= maxAge || !when.After(r.ledger.Created())
+	var skip Result
 
-	claimed, err := r.ledger.ClaimMilestone(key)
+	switch {
+	case r.now().Sub(when) >= maxAge || !when.After(r.ledger.Created()):
+		skip = ResultTooOld
+	case closed.Repair:
+		floor, err := r.ledger.RepairFloor()
+		if err != nil {
+			return "", fmt.Errorf("read repair floor: %w", err)
+		}
+
+		if !when.After(floor) {
+			if name == milestoneMerged {
+				return ResultPreFloor, nil
+			}
+
+			skip = ResultPreFloor
+		}
+	}
+
+	claimed, err := r.ledger.ClaimMilestone(closed.NodeID + "\x00" + name)
 	if err != nil {
 		return "", fmt.Errorf("claim %s milestone: %w", name, err)
 	}
 
 	switch {
-	case skip:
-		return ResultTooOld, nil
+	case skip != "":
+		return skip, nil
 	case !claimed:
 		return ResultAlreadyCounted, nil
 	}
