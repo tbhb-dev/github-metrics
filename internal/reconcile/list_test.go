@@ -223,16 +223,7 @@ func TestUpdatedFirstPageTagOnly(t *testing.T) {
 func TestRepositoriesSinglePageUsesTag(t *testing.T) {
 	t.Parallel()
 
-	fake := newRig(t, func(resp http.ResponseWriter, req *http.Request, _ string) {
-		if req.Header.Get("If-None-Match") == `"list"` {
-			resp.WriteHeader(http.StatusNotModified)
-
-			return
-		}
-
-		resp.Header().Set("ETag", `"list"`)
-		write(t, resp, `{"repositories":[{"id":7,"full_name":"o/r"},{"id":8,"full_name":"o/s"}]}`)
-	})
+	fake := newRig(t, tagged(t, `"list"`, `{"repositories":[{"id":7,"full_name":"o/r"},{"id":8,"full_name":"o/s"}]}`))
 
 	for range 2 {
 		repos, truncated, err := fake.lister.Repositories(t.Context())
@@ -328,5 +319,44 @@ func TestListerKeepsBasePath(t *testing.T) {
 	if want := []string{"/api/v3/installation/repositories?per_page=100", "/api/v3/repos/o/r/pulls?" +
 		"state=all&sort=updated&direction=desc&per_page=100"}; err != nil || !slices.Equal(fake.requests, want) {
 		t.Errorf("requests = %v, err = %v", fake.requests, err)
+	}
+}
+
+// tagged serves the body with the tag, and a 304 for a request that sends the tag.
+func tagged(t *testing.T, tag, body string) func(http.ResponseWriter, *http.Request, string) {
+	t.Helper()
+
+	return func(resp http.ResponseWriter, req *http.Request, _ string) {
+		if req.Header.Get("If-None-Match") == tag {
+			resp.WriteHeader(http.StatusNotModified)
+
+			return
+		}
+
+		resp.Header().Set("ETag", tag)
+		write(t, resp, body)
+	}
+}
+
+func TestClearUpdatedDropsFirstPageTag(t *testing.T) {
+	t.Parallel()
+
+	fake := newRig(t, tagged(t, `"v1"`, "[]"))
+	walk := func() (reconcile.Walked, error) { return fake.lister.Updated(t.Context(), "o/r", opts(50)) }
+
+	_, err := walk()
+	if err == nil {
+		_, err = walk()
+	}
+
+	if err != nil || fake.tags[firstPage] != `"v1"` {
+		t.Fatalf("err = %v, second walk sent tag %q, want the stored one", err, fake.tags[firstPage])
+	}
+
+	fake.lister.ClearUpdated("o/r")
+
+	got, err := walk()
+	if err != nil || got.Unchanged || fake.tags[firstPage] != "" {
+		t.Errorf("got = %+v, err = %v, sent tag = %q, want a full read", got, err, fake.tags[firstPage])
 	}
 }

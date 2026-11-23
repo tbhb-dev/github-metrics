@@ -24,6 +24,14 @@ const (
 type RepositoryLister interface {
 	Repositories(ctx context.Context) ([]Repository, bool, error)
 	Updated(ctx context.Context, repo string, opts WalkOptions) (Walked, error)
+	// ClearUpdated drops the repository's first-page tag after a failure the
+	// walk couldn't see.
+	ClearUpdated(repo string)
+}
+
+// EndReader reads the first end of a pull request from its issue events.
+type EndReader interface {
+	FirstEnd(ctx context.Context, repo string, number int) (End, error)
 }
 
 // ClosedRecorder claims and records pull request milestones.
@@ -52,18 +60,26 @@ const (
 	RunAuthFailed RunStatus = "auth_failed"
 )
 
-// RunResult counts attempted repository walks, their fetched pages and merge outcomes.
+// RunResult counts attempted repository walks, their fetched pages (pull
+// request and event pages) and milestone outcomes. The first four outcome
+// counts are for the merge milestone, the next four for the ended milestone.
+// Ambiguous counts items whose first end couldn't be read, so only the merge
+// was recorded.
 type RunResult struct {
 	Result                                              RunStatus
 	Repositories, Pages, NotModified, Truncated         int
 	Recorded, AlreadyCounted, TooOld, PreFloor, Skipped int
+	EndedRecorded, EndedAlreadyCounted                  int
+	EndedTooOld, EndedPreFloor, Ambiguous               int
 }
 
-// Run walks the installation once and repairs merge counts. A watermark moves
-// forward only after the whole window has been walked and its items processed.
-func Run(ctx context.Context, lister RepositoryLister, record ClosedRecorder, store Watermarks, clock Clock) (
-	RunResult, error,
-) {
+// Run walks the installation once and repairs merge and ended counts. A
+// watermark moves forward only after the whole window has been walked and its
+// items processed.
+func Run(
+	ctx context.Context, lister RepositoryLister, events EndReader, record ClosedRecorder, store Watermarks,
+	clock Clock,
+) (RunResult, error) {
 	var result RunResult
 
 	floor := clock.Now().Add(-repairWindow)
@@ -87,7 +103,7 @@ func Run(ctx context.Context, lister RepositoryLister, record ClosedRecorder, st
 			break
 		}
 
-		err = repairRepository(ctx, lister, record, store, repository.FullName, floor, &result)
+		err = repairRepository(ctx, lister, events, record, store, repository.FullName, floor, &result)
 		if err != nil {
 			result.Result = RunPartial
 
@@ -103,7 +119,7 @@ func Run(ctx context.Context, lister RepositoryLister, record ClosedRecorder, st
 }
 
 func repairRepository(
-	ctx context.Context, lister RepositoryLister, record ClosedRecorder, store Watermarks,
+	ctx context.Context, lister RepositoryLister, events EndReader, record ClosedRecorder, store Watermarks,
 	repo string, floor time.Time, result *RunResult,
 ) error {
 	watermark, err := store.Watermark(repo)
@@ -138,8 +154,11 @@ func repairRepository(
 		result.Result = RunPartial
 	}
 
-	err = recordMerges(ctx, record, walked.Items, result)
-	if err != nil {
+	// A 304 would hide items this pass couldn't finish, so clear the tag first.
+	stopped, err := recordItems(ctx, events, record, walked.Items, result)
+	if err != nil || stopped {
+		lister.ClearUpdated(repo)
+
 		return err
 	}
 
@@ -162,34 +181,61 @@ func walkStatus(err error) RunStatus {
 	return RunPartial
 }
 
-func recordMerges(ctx context.Context, record ClosedRecorder, items []ClosedPR, result *RunResult) error {
+// recordItems records each item's merge and first end. It reports true when
+// an events read failed and the repository's items can't be finished: the run
+// is then partial, or failed on auth, and the caller must not advance the
+// watermark.
+func recordItems(
+	ctx context.Context, events EndReader, record ClosedRecorder, items []ClosedPR, result *RunResult,
+) (bool, error) {
 	for _, item := range items {
-		if item.ClosedAt.IsZero() || item.MergedAt.IsZero() {
+		if item.ClosedAt.IsZero() {
 			result.Skipped++
 
 			continue
 		}
 
+		end, err := events.FirstEnd(ctx, item.Repository, item.Number)
+		result.Pages += end.Pages
+
+		if err != nil {
+			result.Result = walkStatus(err)
+
+			return true, nil
+		}
+
+		if end.At.IsZero() {
+			result.Ambiguous++
+		}
+
 		outcome, err := record.RecordClosed(ctx, recorder.ClosedPR{
-			CreatedAt: item.CreatedAt, MergedAt: item.MergedAt, EndedAt: time.Time{},
-			Repository: item.Repository, NodeID: item.NodeID, Body: "", EndedState: "",
+			CreatedAt: item.CreatedAt, MergedAt: item.MergedAt, EndedAt: end.At,
+			Repository: item.Repository, NodeID: item.NodeID, Body: item.Body, EndedState: end.State,
 			Merged: item.Merged, Repair: true,
 		})
 		if err != nil {
-			return fmt.Errorf("record reconciled merge: %w", err)
+			return false, fmt.Errorf("record reconciled milestones: %w", err)
 		}
 
-		switch outcome.Merged {
-		case recorder.ResultRecorded:
-			result.Recorded++
-		case recorder.ResultAlreadyCounted:
-			result.AlreadyCounted++
-		case recorder.ResultTooOld:
-			result.TooOld++
-		case recorder.ResultPreFloor:
-			result.PreFloor++
-		}
+		tally(outcome.Merged, &result.Recorded, &result.AlreadyCounted, &result.TooOld, &result.PreFloor)
+		tally(
+			outcome.Ended,
+			&result.EndedRecorded, &result.EndedAlreadyCounted, &result.EndedTooOld, &result.EndedPreFloor,
+		)
 	}
 
-	return nil
+	return false, nil
+}
+
+func tally(outcome recorder.Result, recorded, alreadyCounted, tooOld, preFloor *int) {
+	switch outcome {
+	case recorder.ResultRecorded:
+		*recorded++
+	case recorder.ResultAlreadyCounted:
+		*alreadyCounted++
+	case recorder.ResultTooOld:
+		*tooOld++
+	case recorder.ResultPreFloor:
+		*preFloor++
+	}
 }

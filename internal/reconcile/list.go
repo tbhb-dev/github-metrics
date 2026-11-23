@@ -58,6 +58,8 @@ type ClosedPR struct {
 	Body string `json:"body"`
 	// Repository is the full name the walk was asked for.
 	Repository string `json:"-"`
+	// Number is the pull request number, which the issue events URL needs.
+	Number int `json:"number"`
 	// Merged is true when the item has a merge time, since a list item has no
 	// merged field.
 	Merged bool `json:"-"`
@@ -147,7 +149,7 @@ func (l *Lister) Repositories(ctx context.Context) ([]Repository, bool, error) {
 // first-page tag, so the next walk reads the page in full, and so does a walk
 // whose stop time reaches back further than the last clean one.
 func (l *Lister) Updated(ctx context.Context, repo string, opts WalkOptions) (Walked, error) {
-	first := "repos/" + repo + "/pulls?state=all&sort=updated&direction=desc&per_page=100"
+	first := updatedPath(repo)
 
 	// A tag only proves the first page is unchanged, so it can't stand in for a
 	// deeper walk than the one that stored it.
@@ -164,6 +166,17 @@ func (l *Lister) Updated(ctx context.Context, repo string, opts WalkOptions) (Wa
 	}
 
 	return walked, err
+}
+
+// ClearUpdated drops the stored first-page tag of a repository's walk, so the
+// next walk reads the page in full. A caller uses it when it couldn't finish
+// the items of a walk that ended cleanly, since a 304 would hide them.
+func (l *Lister) ClearUpdated(repo string) {
+	l.clear(updatedPath(repo))
+}
+
+func updatedPath(repo string) string {
+	return "repos/" + repo + "/pulls?state=all&sort=updated&direction=desc&per_page=100"
 }
 
 // clear drops the stored tag of a path or Next URL, keyed as the client keys it.
