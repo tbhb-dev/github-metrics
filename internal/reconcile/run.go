@@ -23,6 +23,7 @@ const (
 // RepositoryLister supplies the installation's repositories and updated pull requests.
 type RepositoryLister interface {
 	Repositories(ctx context.Context) ([]Repository, bool, error)
+	// Updated clears its first-page tag after an incomplete walk.
 	Updated(ctx context.Context, repo string, opts WalkOptions) (Walked, error)
 	// ClearUpdated drops the repository's first-page tag after a failure the
 	// walk couldn't see.
@@ -86,7 +87,7 @@ func Run(
 
 	repos, truncated, err := lister.Repositories(ctx)
 	if err != nil {
-		result.Result = walkStatus(err)
+		handleReadError(&result, err)
 
 		return result, nil
 	}
@@ -103,14 +104,14 @@ func Run(
 			break
 		}
 
-		err = repairRepository(ctx, lister, events, record, store, repository.FullName, floor, &result)
-		if err != nil {
+		stop, repairErr := repairRepository(ctx, lister, events, record, store, repository.FullName, floor, &result)
+		if repairErr != nil {
 			result.Result = RunPartial
 
-			return result, err
+			return result, repairErr
 		}
 
-		if result.Result == RunAuthFailed {
+		if stop {
 			break
 		}
 	}
@@ -121,10 +122,10 @@ func Run(
 func repairRepository(
 	ctx context.Context, lister RepositoryLister, events EndReader, record ClosedRecorder, store Watermarks,
 	repo string, floor time.Time, result *RunResult,
-) error {
+) (bool, error) {
 	watermark, err := store.Watermark(repo)
 	if err != nil {
-		return fmt.Errorf("read reconcile watermark: %w", err)
+		return false, fmt.Errorf("read reconcile watermark: %w", err)
 	}
 
 	stop := floor
@@ -138,15 +139,13 @@ func repairRepository(
 	result.Pages += walked.Pages
 
 	if err != nil {
-		result.Result = walkStatus(err)
-
-		return nil
+		return handleReadError(result, err) == stopPass, nil
 	}
 
 	if walked.Unchanged {
 		result.NotModified++
 
-		return nil
+		return false, nil
 	}
 
 	if walked.Truncated {
@@ -155,39 +154,56 @@ func repairRepository(
 	}
 
 	// A 304 would hide items this pass couldn't finish, so clear the tag first.
-	stopped, err := recordItems(ctx, events, record, walked.Items, result)
-	if err != nil || stopped {
+	read, err := recordItems(ctx, events, record, walked.Items, result)
+	if read != readsComplete || err != nil {
 		lister.ClearUpdated(repo)
 
-		return err
+		return read == stopPass, err
 	}
 
 	if !walked.Truncated && walked.Newest.After(watermark) {
 		err = store.SetWatermark(repo, walked.Newest)
 		if err != nil {
-			return fmt.Errorf("write reconcile watermark: %w", err)
+			lister.ClearUpdated(repo)
+
+			return false, fmt.Errorf("write reconcile watermark: %w", err)
 		}
 	}
 
-	return nil
+	return false, nil
 }
 
-func walkStatus(err error) RunStatus {
+type readOutcome uint8
+
+const (
+	readsComplete readOutcome = iota
+	skipRepository
+	stopPass
+)
+
+// handleReadError sets the result and reports whether the pass can continue.
+func handleReadError(result *RunResult, err error) readOutcome {
 	status, ok := errors.AsType[*ghclient.StatusError](err)
 	if errors.Is(err, ghclient.ErrTokenSource) || ok && status.Status == http.StatusUnauthorized {
-		return RunAuthFailed
+		result.Result = RunAuthFailed
+
+		return stopPass
 	}
 
-	return RunPartial
+	result.Result = RunPartial
+
+	if errors.Is(err, ghclient.ErrGaveUp) || errors.Is(err, context.DeadlineExceeded) {
+		return stopPass
+	}
+
+	return skipRepository
 }
 
-// recordItems records each item's merge and first end. It reports true when
-// an events read failed and the repository's items can't be finished: the run
-// is then partial, or failed on auth, and the caller must not advance the
-// watermark.
+// recordItems records each item's merge and first end. An events read failure
+// reports whether to skip the repository or stop the pass.
 func recordItems(
 	ctx context.Context, events EndReader, record ClosedRecorder, items []ClosedPR, result *RunResult,
-) (bool, error) {
+) (readOutcome, error) {
 	for _, item := range items {
 		if item.ClosedAt.IsZero() {
 			result.Skipped++
@@ -199,9 +215,7 @@ func recordItems(
 		result.Pages += end.Pages
 
 		if err != nil {
-			result.Result = walkStatus(err)
-
-			return true, nil
+			return handleReadError(result, err), nil
 		}
 
 		if end.At.IsZero() {
@@ -214,7 +228,7 @@ func recordItems(
 			Merged: item.Merged, Repair: true,
 		})
 		if err != nil {
-			return false, fmt.Errorf("record reconciled milestones: %w", err)
+			return readsComplete, fmt.Errorf("record reconciled milestones: %w", err)
 		}
 
 		tally(outcome.Merged, &result.Recorded, &result.AlreadyCounted, &result.TooOld, &result.PreFloor)
@@ -224,7 +238,7 @@ func recordItems(
 		)
 	}
 
-	return false, nil
+	return readsComplete, nil
 }
 
 func tally(outcome recorder.Result, recorded, alreadyCounted, tooOld, preFloor *int) {

@@ -5,6 +5,7 @@ package reconcile_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -145,10 +146,17 @@ func TestUpdatedUncleanWalkClearsTag(t *testing.T) {
 		name      string
 		maxPages  int32
 		failPage  int32
+		status    int
+		pages     int
 		truncated bool
 	}{
-		{name: "truncated at the cap", maxPages: 3, failPage: 0, truncated: true},
-		{name: "error mid-walk", maxPages: 50, failPage: 2, truncated: false},
+		{name: "truncated at the cap", maxPages: 3, failPage: 0, status: 0, pages: 3, truncated: true},
+		{
+			name: "error mid-walk", maxPages: 50, failPage: 2,
+			status: http.StatusInternalServerError, pages: 1, truncated: false,
+		},
+		{name: "decode failure", maxPages: 50, failPage: 2, status: http.StatusOK, pages: 2, truncated: false},
+		{name: "budget gave up", maxPages: 50, failPage: 2, status: http.StatusForbidden, pages: 1, truncated: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -158,7 +166,7 @@ func TestUpdatedUncleanWalkClearsTag(t *testing.T) {
 			fake := newRig(t, func(resp http.ResponseWriter, _ *http.Request, host string) {
 				page := served.Add(1)
 				if page == test.failPage {
-					resp.WriteHeader(http.StatusInternalServerError)
+					failPullPage(t, resp, test.status)
 
 					return
 				}
@@ -169,7 +177,8 @@ func TestUpdatedUncleanWalkClearsTag(t *testing.T) {
 			})
 
 			got, err := fake.lister.Updated(t.Context(), "o/r", opts(int(test.maxPages)))
-			if (err != nil) == test.truncated || got.Truncated != test.truncated || !got.Newest.IsZero() {
+			if (err != nil) == test.truncated || got.Truncated != test.truncated || !got.Newest.IsZero() ||
+				got.Pages != test.pages || (test.status == http.StatusForbidden && !errors.Is(err, ghclient.ErrGaveUp)) {
 				t.Fatalf("got = %+v, err = %v", got, err)
 			}
 
@@ -178,6 +187,23 @@ func TestUpdatedUncleanWalkClearsTag(t *testing.T) {
 			}
 		})
 	}
+}
+
+func failPullPage(t *testing.T, resp http.ResponseWriter, status int) {
+	t.Helper()
+
+	if status == http.StatusOK {
+		write(t, resp, "[")
+
+		return
+	}
+
+	if status == http.StatusForbidden {
+		resp.Header().Set("X-Ratelimit-Resource", "search")
+		resp.Header().Set("X-Ratelimit-Remaining", "0")
+	}
+
+	resp.WriteHeader(status)
 }
 
 func TestUpdatedFirstPageTagOnly(t *testing.T) {

@@ -4,6 +4,9 @@
 package reconcile_test
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"slices"
 	"strings"
@@ -108,5 +111,48 @@ func TestFirstEndKeepsBasePath(t *testing.T) {
 	got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7)
 	if err != nil || got.At.IsZero() || !slices.Equal(fake.requests, []string{"/api/v3" + eventsPath}) {
 		t.Errorf("got = %+v, err = %v, requests = %v", got, err, fake.requests)
+	}
+}
+
+func TestFirstEndReadFailure(t *testing.T) {
+	t.Parallel()
+
+	const secondPage = eventsPath + "&page=2"
+
+	for _, test := range []struct {
+		name        string
+		pages       int
+		interrupted bool
+	}{
+		{name: "decode", pages: 2, interrupted: false},
+		{name: "transport", pages: 1, interrupted: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := newRig(t, func(resp http.ResponseWriter, req *http.Request, host string) {
+				if req.URL.RequestURI() == eventsPath {
+					resp.Header().Set("Link", "<"+host+secondPage+`>; rel="next"`)
+					write(t, resp, "["+event(closedEvent, "2026-01-02T01:00:00Z")+"]")
+
+					return
+				}
+
+				if test.interrupted {
+					resp.Header().Set("Content-Length", "10")
+				}
+
+				write(t, resp, "[")
+			})
+
+			got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7)
+			_, decodeErr := errors.AsType[*json.SyntaxError](err)
+
+			if decodeErr == test.interrupted || errors.Is(err, io.ErrUnexpectedEOF) != test.interrupted ||
+				!got.At.IsZero() || got.State != "" || got.Pages != test.pages ||
+				!slices.Equal(fake.requests, []string{eventsPath, secondPage}) {
+				t.Errorf("got = %+v, err = %v, requests = %v", got, err, fake.requests)
+			}
+		})
 	}
 }

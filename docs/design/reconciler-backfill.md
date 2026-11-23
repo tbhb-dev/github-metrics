@@ -96,7 +96,7 @@ Under the 24-hour and creation-time gates, a backfill over history records no me
 | `*StatusError` 403 or 404 for one repository | Log it, skip the repository, finish the run with result `partial` |
 | `ErrGaveUp`, or the run deadline | Stop the run with result `partial`. The budget has already backed off (`internal/ghclient/ghclient.go:216-222`) |
 | `ErrBodyTooLarge`, or a decode error | Skip the repository, clear its first-page tag, result `partial` |
-| A store error from a claim or a watermark write | Return the error and stop the service, as the worker does (`internal/worker/worker.go:66-69`, `cmd/github-metrics/main.go:126-130`). The restart policy brings it back (`deploy/compose.yaml:51`) |
+| A store error from a claim or a watermark write | Clear the first-page tag and return the error. Count the pass as `partial` and retry on the next tick. After three consecutive pass errors, return the last error to stop the service. The restart policy brings it back (`deploy/compose.yaml:51`) |
 | Collector down | Records go into cumulative memory and leave at the next accepted export. A crash during the outage loses them, as appendix A accepts (`docs/architecture/appendix-a-trace-and-metric-catalog.md:186-190`) |
 
 ## 9. What the service reports about itself
@@ -113,7 +113,7 @@ Metrics, on the meter from `telemetry.Setup`, with no repository attribute so th
 
 `repairs` runs a little above the true miss count: a delivery still in the queue when the run reaches its PR loses the race. The worker polls every second, so the window is small.
 
-Logs, through the existing JSON handler (`cmd/github-metrics/main.go:67`): one info line per run with `kind`, `result`, `repos`, `pages`, `not_modified`, `recorded`, `already_counted`, `truncated` and `duration`; one warn line per skipped or truncated repository with its numeric repository ID and the status, never its name; and one error line on `auth_failed`, alongside the token source's own line. No line carries a token, a body, a title or a PR number.
+The existing JSON handler (`cmd/github-metrics/main.go:67`) writes one summary per run with `kind`, `result`, `repos`, `pages`, `not_modified`, `recorded`, `already_counted`, `truncated` and `duration`. A run that returns an error logs its summary at error level and omits the error text. Other run summaries log at info level. Each skipped or truncated repository gets a warning with its numeric repository ID and status. An `auth_failed` result gets an error line alongside the token source's own line. No line carries a repository name, a token, a body, a title or a PR number.
 
 ## 10. Pull request split
 
