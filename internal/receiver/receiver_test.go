@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
@@ -36,6 +37,9 @@ const (
 	pingEvent        = "ping"
 	pullRequestEvent = "pull_request"
 	openedBody       = `{"action":"opened"}`
+	errorLevel       = `"level":"ERROR"`
+	loggedDelivery   = `"delivery":"` + deliveryID + `"`
+	loggedEvent      = `"event":"` + pullRequestEvent + `"`
 )
 
 func sign(secret, body string) string {
@@ -91,18 +95,47 @@ func do(t *testing.T, secret, method, path, body string, header map[string]strin
 	return rec.Code
 }
 
-func postDelivery(t *testing.T, handler http.Handler) int {
-	t.Helper()
-
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", strings.NewReader(openedBody))
+func newDeliveryRequest(ctx context.Context, body io.Reader) *http.Request {
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/webhook", body)
 	req.Header.Set(sigHeader, sign(testSecret, openedBody))
 	req.Header.Set(deliveryHeader, deliveryID)
 	req.Header.Set(eventHeader, pullRequestEvent)
 
+	return req
+}
+
+func postDelivery(t *testing.T, handler http.Handler) int {
+	t.Helper()
+
+	req := newDeliveryRequest(t.Context(), strings.NewReader(openedBody))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	return rec.Code
+}
+
+func assertQueuedDelivery(t *testing.T, repo *store.Bolt) {
+	t.Helper()
+
+	entries, err := repo.Pending(10)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+
+	if len(entries) != 1 || entries[0].Delivery != deliveryID || entries[0].Event != pullRequestEvent ||
+		string(entries[0].Body) != openedBody {
+		t.Fatalf("pending = %+v", entries)
+	}
+}
+
+func assertLogContains(t *testing.T, log string, fields ...string) {
+	t.Helper()
+
+	for _, field := range fields {
+		if !strings.Contains(log, field) {
+			t.Errorf("log = %s, want %s", log, field)
+		}
+	}
 }
 
 func TestWebhook(t *testing.T) {
@@ -448,19 +481,8 @@ func TestNewDeliveryQueued(t *testing.T) {
 		t.Fatalf("status = %d, want 202", got)
 	}
 
-	entries, err := repo.Pending(10)
-	if err != nil {
-		t.Fatalf("Pending: %v", err)
-	}
-
-	if len(entries) != 1 || entries[0].Delivery != deliveryID || entries[0].Event != pullRequestEvent ||
-		string(entries[0].Body) != openedBody {
-		t.Fatalf("pending = %+v", entries)
-	}
-
-	if !strings.Contains(logs.String(), `"outcome":"enqueued"`) {
-		t.Errorf("log = %s, want outcome enqueued", logs.String())
-	}
+	assertQueuedDelivery(t, repo)
+	assertLogContains(t, logs.String(), `"outcome":"enqueued"`)
 }
 
 func TestReplayDeliveryIsDuplicate(t *testing.T) {
@@ -513,9 +535,7 @@ func TestStoreErrorAnswers500(t *testing.T) {
 		t.Fatalf("status = %d, want 500", got)
 	}
 
-	if !strings.Contains(logs.String(), `"level":"ERROR"`) {
-		t.Errorf("log = %s, want an ERROR line", logs.String())
-	}
+	assertLogContains(t, logs.String(), errorLevel, `"msg":"enqueue delivery"`, loggedDelivery, loggedEvent)
 }
 
 // gateBody signals on its first Read, then blocks until release closes.
@@ -544,11 +564,8 @@ func holdSlots(t *testing.T, handler http.Handler) func() {
 
 	for range receiver.MaxInFlight {
 		group.Go(func() {
-			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook",
+			req := newDeliveryRequest(t.Context(),
 				&gateBody{started: started, release: release, once: sync.Once{}})
-			req.Header.Set(sigHeader, sign(testSecret, openedBody))
-			req.Header.Set(deliveryHeader, deliveryID)
-			req.Header.Set(eventHeader, pingEvent)
 			handler.ServeHTTP(httptest.NewRecorder(), req)
 		})
 	}
@@ -563,93 +580,115 @@ func holdSlots(t *testing.T, handler http.Handler) func() {
 	}
 }
 
-func TestInFlightLimit(t *testing.T) {
+func TestInFlightWaitAcceptsAndQueues(t *testing.T) {
 	t.Parallel()
 
-	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
-	free := holdSlots(t, handler)
+	synctest.Test(t, func(t *testing.T) {
+		repo := openStore(t)
+		handler := receiver.Handler([]byte(testSecret), repo, slog.New(slog.DiscardHandler))
+		free := holdSlots(t, handler)
 
-	over := httptest.NewRecorder()
-	extra := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", strings.NewReader(openedBody))
-	extra.Header.Set(sigHeader, sign(testSecret, openedBody))
-	extra.Header.Set(deliveryHeader, deliveryID)
-	extra.Header.Set(eventHeader, pingEvent)
-	handler.ServeHTTP(over, extra)
+		done := make(chan int, 1)
 
-	if over.Code != http.StatusServiceUnavailable || over.Header().Get("Retry-After") == "" {
-		t.Errorf(
-			"over the limit: status %d, Retry-After %q, want 503 with Retry-After",
-			over.Code,
-			over.Header().Get("Retry-After"),
-		)
-	}
+		go func() { done <- postDelivery(t, handler) }()
 
-	if over.Header().Get("Connection") != "close" {
-		t.Errorf(
-			"over the limit: Connection %q, want close so the server doesn't drain the body",
-			over.Header().Get("Connection"),
-		)
-	}
+		synctest.Wait()
+		time.Sleep(time.Second)
+		synctest.Wait()
 
-	free()
+		if len(done) != 0 {
+			t.Error("delivery returned while all slots were held")
+		}
 
-	if got := postDelivery(t, handler); got != http.StatusAccepted {
-		t.Errorf("after the slots free: status %d, want 202", got)
-	}
+		free()
+
+		if got := <-done; got != http.StatusAccepted {
+			t.Fatalf("after the slots free: status %d, want 202", got)
+		}
+
+		assertQueuedDelivery(t, repo)
+	})
 }
 
-// A rejected delivery's answer must not wait for its body, or slow rejected
-// bodies would read concurrently outside the limit.
-func TestInFlightRejectClosesConnection(t *testing.T) {
+func TestInFlightWaitTimesOut(t *testing.T) {
 	t.Parallel()
 
-	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
-	srv := httptest.NewServer(handler)
+	synctest.Test(t, func(t *testing.T) {
+		const wantWait = 8 * time.Second
 
-	t.Cleanup(srv.Close)
+		var logs bytes.Buffer
 
-	free := holdSlots(t, handler)
-	defer free()
+		handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.NewJSONHandler(&logs, nil)))
+		free := holdSlots(t, handler)
 
-	for _, framing := range []string{"Content-Length: 1000", "Transfer-Encoding: chunked"} {
-		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer free()
 
-		conn, err := new(net.Dialer).DialContext(ctx, "tcp", srv.Listener.Addr().String())
-		if err != nil {
-			cancel()
-			t.Fatal(err)
+		rec := httptest.NewRecorder()
+		req := newDeliveryRequest(t.Context(), failReader{t: t})
+		start := time.Now()
+
+		handler.ServeHTTP(rec, req)
+
+		if got := time.Since(start); got != wantWait {
+			t.Errorf("wait = %v, want %v", got, wantWait)
 		}
 
-		// Send the headers and a short piece of the body, then stop.
-		head := "POST /webhook HTTP/1.1\r\nHost: x\r\n" + framing + "\r\n" +
-			sigHeader + ": " + sign(testSecret, openedBody) + "\r\n" +
-			deliveryHeader + ": " + deliveryID + "\r\n" +
-			eventHeader + ": " + pingEvent + "\r\n\r\n"
-
-		_, err = conn.Write([]byte(head + "a"))
-		if err != nil {
-			t.Fatal(err)
+		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+			t.Errorf("status %d, Retry-After %q, want 503 with Retry-After", rec.Code, rec.Header().Get("Retry-After"))
 		}
 
-		err = conn.SetReadDeadline(time.Now().Add(time.Second))
-		if err != nil {
-			t.Fatal(err)
+		if got := rec.Header().Get("Connection"); got != "close" {
+			t.Errorf("Connection %q, want close", got)
 		}
 
-		// The server must answer 503 and then close, with the body unfinished.
-		answer, err := io.ReadAll(conn)
-		if err != nil {
-			t.Errorf("%s: connection stayed open after the 503: %v", framing, err)
+		assertLogContains(t, logs.String(), errorLevel, `"msg":"rejected delivery"`,
+			`"reason":"no free slot after wait"`, loggedDelivery, loggedEvent)
+	})
+}
+
+func TestInFlightWaitStopsOnCancellation(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		repo := openStore(t)
+		handler := receiver.Handler([]byte(testSecret), repo, slog.New(slog.DiscardHandler))
+		free := holdSlots(t, handler)
+
+		defer free()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		req := newDeliveryRequest(ctx, failReader{t: t})
+		done := make(chan struct{})
+
+		go func() {
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			close(done)
+		}()
+
+		synctest.Wait()
+
+		select {
+		case <-done:
+			t.Fatal("delivery returned before cancellation")
+		default:
 		}
 
-		if !strings.HasPrefix(string(answer), "HTTP/1.1 503 ") {
-			t.Errorf("%s: answer %q, want a 503", framing, answer)
-		}
-
-		_ = conn.Close()
+		start := time.Now()
 
 		cancel()
-	}
+		<-done
+
+		if got := time.Since(start); got != 0 {
+			t.Errorf("wait after cancellation = %v, want 0", got)
+		}
+
+		entries, err := repo.Pending(1)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("Pending = %+v, %v, want no entries", entries, err)
+		}
+	})
 }
 
 var errNoDeadline = errors.New("no deadline")
@@ -691,26 +730,25 @@ func (w *hijackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return w.conn, bufio.NewReadWriter(bufio.NewReader(strings.NewReader("")), bufio.NewWriter(w.conn)), nil
 }
 
-// serveBusy sends one delivery to a handler whose slots are all held, so it gets the 503 path.
-// It returns the time just before the request, so a test measures only the handler.
+// serveBusy runs the 503 path on a fake clock and returns the time the handler ends.
 func serveBusy(t *testing.T, conn *spyConn) time.Time {
 	t.Helper()
 
-	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
-	free := holdSlots(t, handler)
+	var end time.Time
 
-	defer free()
+	synctest.Test(t, func(t *testing.T) {
+		handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.DiscardHandler))
+		free := holdSlots(t, handler)
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/webhook", strings.NewReader(openedBody))
-	req.Header.Set(sigHeader, sign(testSecret, openedBody))
-	req.Header.Set(deliveryHeader, deliveryID)
-	req.Header.Set(eventHeader, pingEvent)
+		defer free()
 
-	start := time.Now()
+		req := newDeliveryRequest(t.Context(), failReader{t: t})
+		handler.ServeHTTP(&hijackWriter{ResponseWriter: httptest.NewRecorder(), conn: conn}, req)
 
-	handler.ServeHTTP(&hijackWriter{ResponseWriter: httptest.NewRecorder(), conn: conn}, req)
+		end = time.Now()
+	})
 
-	return start
+	return end
 }
 
 // TestInFlightRejectBoundsWrite checks that the 503 on a hijacked connection has a write deadline of about 5 s.
@@ -718,7 +756,7 @@ func TestInFlightRejectBoundsWrite(t *testing.T) {
 	t.Parallel()
 
 	conn := new(spyConn)
-	start := serveBusy(t, conn)
+	end := serveBusy(t, conn)
 
 	if !conn.closed {
 		t.Error("connection stayed open")
@@ -728,9 +766,9 @@ func TestInFlightRejectBoundsWrite(t *testing.T) {
 		t.Errorf("wrote %q, want a 503", conn.written.String())
 	}
 
-	wait := conn.deadline.Sub(start)
-	if wait < 4*time.Second || wait > 6*time.Second {
-		t.Errorf("write deadline %v after the request, want about 5 s", wait)
+	const want = 5 * time.Second
+	if got := conn.deadline.Sub(end); got != want {
+		t.Errorf("write deadline %v after the response, want %v", got, want)
 	}
 }
 

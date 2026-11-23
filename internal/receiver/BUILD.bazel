@@ -22,6 +22,7 @@ go_test(
     srcs = [
         "fuzz_internal_test.go",
         "receiver_test.go",
+        "reject_busy_internal_test.go",
         "server_test.go",
     ],
     embed = [":receiver"],
