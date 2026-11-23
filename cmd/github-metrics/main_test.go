@@ -74,7 +74,7 @@ func TestLogRepairFloorReadError(t *testing.T) {
 func TestNewRecorderWithoutLedger(t *testing.T) {
 	t.Parallel()
 
-	_, err := newRecorder("configured", nil, nil)
+	_, err := newRecorder("configured", nil, nil, slog.New(slog.DiscardHandler))
 	if !errors.Is(err, recorder.ErrNoLedger) {
 		t.Fatalf("newRecorder error = %v, want %v", err, recorder.ErrNoLedger)
 	}
@@ -83,7 +83,7 @@ func TestNewRecorderWithoutLedger(t *testing.T) {
 func TestNewRecorderWithoutEndpoint(t *testing.T) {
 	t.Parallel()
 
-	consumer, err := newRecorder("", nil, nil)
+	consumer, err := newRecorder("", nil, nil, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestNewRecorderWithEndpoint(t *testing.T) {
 
 	var ledger stubLedger
 
-	consumer, err := newRecorder("configured", provider.Meter("test"), ledger)
+	consumer, err := newRecorder("configured", provider.Meter("test"), ledger, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

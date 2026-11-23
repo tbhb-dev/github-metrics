@@ -5,6 +5,7 @@ package recorder_test
 
 import (
 	"errors"
+	"log/slog"
 	"slices"
 	"testing"
 	"time"
@@ -472,7 +473,7 @@ func TestRecordClaimsBeforeAnyAdd(t *testing.T) {
 func TestNewWithoutLedger(t *testing.T) {
 	t.Parallel()
 
-	_, err := recorder.New(sdkmetric.NewMeterProvider().Meter("test"), nil)
+	_, err := recorder.New(sdkmetric.NewMeterProvider().Meter("test"), nil, slog.New(slog.DiscardHandler))
 	if !errors.Is(err, recorder.ErrNoLedger) {
 		t.Fatalf("New error = %v, want %v", err, recorder.ErrNoLedger)
 	}

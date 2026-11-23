@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Tony Burns
 
-// Package recorder counts queued GitHub deliveries as metrics.
+// Package recorder records metrics and logs from queued GitHub deliveries.
 package recorder
 
 import (
@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -21,9 +22,14 @@ import (
 const maxAge = 24 * time.Hour
 
 const (
-	actionClosed    = "closed"
-	milestoneMerged = "merged"
-	milestoneEnded  = "ended"
+	actionClosed     = "closed"
+	actionCompleted  = "completed"
+	failure          = "failure"
+	milestoneMerged  = "merged"
+	milestoneEnded   = "ended"
+	logTextLimit     = 128
+	metricNameLimit  = 64
+	failedStepsLimit = 8
 )
 
 // ErrNoLedger means New got no ledger to claim milestones in.
@@ -66,12 +72,14 @@ type ClosedPR struct {
 	Repair     bool
 }
 
-// Recorder counts events without recording webhook text in attributes.
+// Recorder records metrics and logs for GitHub events.
 type Recorder struct {
 	events, merges, conclusions, dropped metric.Int64Counter
+	ciJobFailures                        metric.Int64Counter
 	cycleTime                            metric.Float64Histogram
 	mainRed                              metric.Int64Gauge
 	ledger                               Ledger
+	log                                  *slog.Logger
 	now                                  func() time.Time
 }
 
@@ -81,6 +89,21 @@ type checkRun struct {
 	CheckSuite struct {
 		HeadBranch string `json:"head_branch"` //nolint:tagliatelle // GitHub uses this field name.
 	} `json:"check_suite"` //nolint:tagliatelle // GitHub uses this field name.
+}
+
+type workflowJob struct {
+	WorkflowName string `json:"workflow_name"` //nolint:tagliatelle // GitHub uses this field name.
+	Name         string `json:"name"`
+	Conclusion   string `json:"conclusion"`
+	HeadBranch   string `json:"head_branch"`  //nolint:tagliatelle // GitHub uses this field name.
+	HeadSHA      string `json:"head_sha"`     //nolint:tagliatelle // GitHub uses this field name.
+	StartedAt    string `json:"started_at"`   //nolint:tagliatelle // GitHub uses this field name.
+	CompletedAt  string `json:"completed_at"` //nolint:tagliatelle // GitHub uses this field name.
+	Steps        []struct {
+		Name       string `json:"name"`
+		Conclusion string `json:"conclusion"`
+	} `json:"steps"`
+	RunID int64 `json:"run_id"` //nolint:tagliatelle // GitHub uses this field name.
 }
 
 type pullRequest struct {
@@ -96,14 +119,14 @@ type pullRequest struct {
 // each milestone before it counts.
 //
 //nolint:mnd // The histogram has fixed cycle time buckets in seconds.
-func New(meter metric.Meter, ledger Ledger) (*Recorder, error) {
+func New(meter metric.Meter, ledger Ledger, log *slog.Logger) (*Recorder, error) {
 	if ledger == nil {
 		return nil, ErrNoLedger
 	}
 
 	var recorder Recorder
 
-	recorder.ledger, recorder.now = ledger, time.Now
+	recorder.ledger, recorder.log, recorder.now = ledger, log, time.Now
 
 	for _, counter := range []struct {
 		target *metric.Int64Counter
@@ -113,6 +136,7 @@ func New(meter metric.Meter, ledger Ledger) (*Recorder, error) {
 		{&recorder.merges, "github.pr.merges"},
 		{&recorder.conclusions, "github.check.conclusions"},
 		{&recorder.dropped, "github.events.dropped"},
+		{&recorder.ciJobFailures, "ci_job_failures_total"},
 	} {
 		instrument, err := meter.Int64Counter(counter.name)
 		if err != nil {
@@ -159,9 +183,10 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 			FullName      string `json:"full_name"`      //nolint:tagliatelle // GitHub uses this field name.
 			DefaultBranch string `json:"default_branch"` //nolint:tagliatelle // GitHub uses this field name.
 		} `json:"repository"`
-		Action      string      `json:"action"`
-		CheckRun    checkRun    `json:"check_run"`    //nolint:tagliatelle // GitHub uses this field name.
-		PullRequest pullRequest `json:"pull_request"` //nolint:tagliatelle // GitHub uses this field name.
+		Action      string          `json:"action"`
+		CheckRun    checkRun        `json:"check_run"`    //nolint:tagliatelle // GitHub uses this field name.
+		PullRequest pullRequest     `json:"pull_request"` //nolint:tagliatelle // GitHub uses this field name.
+		WorkflowJob json.RawMessage `json:"workflow_job"` //nolint:tagliatelle // GitHub uses this field name.
 	}
 
 	err := json.Unmarshal(body, &delivery)
@@ -198,8 +223,11 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 	r.events.Add(ctx, 0, eventAttrs)
 	r.events.Add(ctx, 1, eventAttrs)
 
-	if event == "check_run" {
+	switch {
+	case event == "check_run":
 		r.recordCheckRun(ctx, repo, delivery.Action, delivery.Repository.DefaultBranch, delivery.CheckRun)
+	case event == "workflow_job" && delivery.Action == actionCompleted:
+		r.recordFailedJob(ctx, repository, delivery.WorkflowJob)
 	}
 
 	return nil
@@ -279,14 +307,14 @@ func (r *Recorder) recordCheckRun(
 	checkName := attribute.String("check_name", run.Name)
 
 	for _, known := range []string{
-		"success", "failure", "cancelled", "skipped", "neutral",
+		"success", failure, "cancelled", "skipped", "neutral",
 		"timed_out", "action_required", "stale", "startup_failure",
 	} {
 		r.conclusions.Add(ctx, 0, metric.WithAttributes(repo, checkName,
 			attribute.String(conclusion, known)))
 	}
 
-	if action != "completed" {
+	if action != actionCompleted {
 		return
 	}
 
@@ -299,11 +327,64 @@ func (r *Recorder) recordCheckRun(
 	}
 
 	var red int64
-	if run.Conclusion == "failure" || run.Conclusion == "timed_out" {
+	if run.Conclusion == failure || run.Conclusion == "timed_out" {
 		red = 1
 	}
 
 	r.mainRed.Record(ctx, red, metric.WithAttributes(repo))
+}
+
+func (r *Recorder) recordFailedJob(ctx context.Context, repository string, body json.RawMessage) {
+	var job workflowJob
+
+	err := json.Unmarshal(body, &job)
+	if err != nil || job.Conclusion != failure {
+		return
+	}
+
+	var failedSteps []string
+
+	for _, step := range job.Steps {
+		if step.Conclusion == failure {
+			failedSteps = append(failedSteps, step.Name)
+			if len(failedSteps) == failedStepsLimit {
+				break
+			}
+		}
+	}
+
+	const repositoryKey, workflowKey, jobKey = "repository", "workflow", "job"
+
+	repository = cleanText(repository, logTextLimit)
+	r.log.InfoContext(ctx, "ci job failed",
+		repositoryKey, repository,
+		workflowKey, cleanText(job.WorkflowName, logTextLimit),
+		jobKey, cleanText(job.Name, logTextLimit),
+		"failed_steps", cleanText(strings.Join(failedSteps, ", "), logTextLimit),
+		"head_branch", cleanText(job.HeadBranch, logTextLimit),
+		"head_sha", cleanText(job.HeadSHA, logTextLimit),
+		"run_id", job.RunID,
+		"started_at", cleanText(job.StartedAt, logTextLimit),
+		"completed_at", cleanText(job.CompletedAt, logTextLimit))
+
+	r.ciJobFailures.Add(ctx, 1, metric.WithAttributes(
+		attribute.String(repositoryKey, repository),
+		attribute.String(workflowKey, cleanText(job.WorkflowName, metricNameLimit)),
+		attribute.String(jobKey, cleanText(job.Name, metricNameLimit)),
+	))
+}
+
+func cleanText(text string, limit int) string {
+	text = strings.ReplaceAll(strings.ReplaceAll(text, "\n", ""), "\r", "")
+	for i := range text {
+		if limit == 0 {
+			return text[:i]
+		}
+
+		limit--
+	}
+
+	return text
 }
 
 func closedFromWebhook(repository string, request pullRequest) ClosedPR {

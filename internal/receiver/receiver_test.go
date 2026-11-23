@@ -482,7 +482,28 @@ func TestNewDeliveryQueued(t *testing.T) {
 	}
 
 	assertQueuedDelivery(t, repo)
-	assertLogContains(t, logs.String(), `"outcome":"enqueued"`)
+	assertLogContains(t, logs.String(), `"outcome":"enqueued"`, `"repository":"unknown"`)
+}
+
+func TestAcceptedDeliveryLogsRepository(t *testing.T) {
+	t.Parallel()
+
+	const body = `{"repository":{"full_name":"tbhb-dev/\r\ngithub-metrics"},"action":"opened"}`
+
+	var logs bytes.Buffer
+
+	handler := receiver.Handler([]byte(testSecret), openStore(t), slog.New(slog.NewJSONHandler(&logs, nil)))
+	req := newDeliveryRequest(t.Context(), strings.NewReader(body))
+	req.Header.Set(sigHeader, sign(testSecret, body))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+
+	assertLogContains(t, logs.String(), `"msg":"accepted delivery"`, `"repository":"tbhb-dev/github-metrics"`)
 }
 
 func TestReplayDeliveryIsDuplicate(t *testing.T) {

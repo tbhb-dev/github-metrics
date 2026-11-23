@@ -98,7 +98,7 @@ func newConsumers(
 	ctx context.Context, endpoint string, cfg reconcileConfig, meter metric.Meter, repo *store.Bolt, log *slog.Logger,
 ) (worker.Recorder, *reconcile.Loop, error) {
 	// cspell:ignore contextcheck
-	consumer, err := newRecorder(endpoint, meter, repo) //nolint:contextcheck // Recorder setup seeds its counters.
+	consumer, err := newRecorder(endpoint, meter, repo, log) //nolint:contextcheck // Recorder setup seeds its counters.
 	if err != nil {
 		return nil, nil, err
 	}
