@@ -428,3 +428,201 @@ func TestOutcomeValues(t *testing.T) {
 		t.Fatalf("outcomes = %d, %d, want 1, 2", store.Enqueued, store.Duplicate)
 	}
 }
+
+func TestClaimMilestone(t *testing.T) {
+	t.Parallel()
+
+	const key = "PR_node\x00merged"
+
+	path := filepath.Join(t.TempDir(), "store.db")
+	claimedAt := time.Date(2026, time.November, 15, 12, 0, 0, 123, time.UTC)
+	now := claimedAt
+	repo := openAt(t, path, func() time.Time { return now })
+
+	checkClaim(t, repo, key, true)
+
+	now = now.Add(time.Hour)
+
+	checkClaim(t, repo, key, false)
+	checkClaim(t, repo, "PR_node\x00ended", true)
+	closeStore(t, repo)
+
+	repo = open(t, path)
+	checkClaim(t, repo, key, false)
+
+	var stamp string
+
+	err := repo.Database().View(func(txn *bolt.Tx) error {
+		stamp = string(txn.Bucket([]byte("milestones")).Get([]byte(key)))
+
+		return nil
+	})
+	if want := claimedAt.Format(time.RFC3339Nano); err != nil || stamp != want {
+		t.Fatalf("milestone timestamp = %q, %v, want %q, nil", stamp, err, want)
+	}
+}
+
+func checkClaim(t *testing.T, repo *store.Bolt, key string, want bool) {
+	t.Helper()
+
+	claimed, err := repo.ClaimMilestone(key)
+	if err != nil || claimed != want {
+		t.Fatalf("ClaimMilestone(%q) = %t, %v, want %t, nil", key, claimed, err, want)
+	}
+}
+
+func TestConcurrentMilestoneClaims(t *testing.T) {
+	t.Parallel()
+
+	const callers = 16
+
+	repo := open(t, filepath.Join(t.TempDir(), "store.db"))
+	start := make(chan struct{})
+	claims := make(chan bool, callers)
+
+	for range callers {
+		go func() {
+			<-start
+
+			claimed, err := repo.ClaimMilestone("PR_node\x00merged")
+			if err != nil {
+				t.Errorf("ClaimMilestone: %v", err)
+			}
+
+			claims <- claimed
+		}()
+	}
+
+	close(start)
+
+	var count int
+
+	for range callers {
+		if <-claims {
+			count++
+		}
+	}
+
+	if count != 1 {
+		t.Fatalf("successful claims = %d, want 1", count)
+	}
+}
+
+func TestRepairFloorIsStampedOnFirstCall(t *testing.T) {
+	t.Setenv("RECONCILE_FLOOR_RESET", "0")
+
+	path := filepath.Join(t.TempDir(), "store.db")
+	now := time.Date(2026, time.November, 15, 12, 0, 0, 123, time.UTC)
+	clock := func() time.Time { return now }
+	repo := openAt(t, path, clock)
+
+	now = now.Add(time.Minute)
+	firstFloor := now
+	checkRepairFloor(t, repo, firstFloor)
+
+	now = now.Add(time.Hour)
+
+	checkRepairFloor(t, repo, firstFloor)
+	closeStore(t, repo)
+
+	repo = openAt(t, path, clock)
+	checkRepairFloor(t, repo, firstFloor)
+}
+
+func TestRepairFloorResetOnce(t *testing.T) {
+	t.Setenv("RECONCILE_FLOOR_RESET", "0")
+
+	path := filepath.Join(t.TempDir(), "store.db")
+	now := time.Date(2026, time.November, 15, 12, 0, 0, 123, time.UTC)
+	clock := func() time.Time { return now }
+	repo := openAt(t, path, clock)
+	checkRepairFloor(t, repo, now)
+	closeStore(t, repo)
+
+	t.Setenv("RECONCILE_FLOOR_RESET", "1")
+
+	now = now.Add(time.Hour)
+	started := now
+	repo = openAt(t, path, clock)
+
+	now = now.Add(time.Minute)
+
+	checkRepairFloor(t, repo, started)
+
+	now = now.Add(time.Hour)
+
+	checkRepairFloor(t, repo, started)
+	closeStore(t, repo)
+
+	t.Setenv("RECONCILE_FLOOR_RESET", "0")
+	repo = openAt(t, path, clock)
+	checkRepairFloor(t, repo, started)
+}
+
+func openAt(t *testing.T, path string, now func() time.Time) *store.Bolt {
+	t.Helper()
+
+	repo, err := store.OpenAt(path, now)
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+
+	t.Cleanup(func() { _ = repo.Close() })
+
+	return repo
+}
+
+func closeStore(t *testing.T, repo *store.Bolt) {
+	t.Helper()
+
+	err := repo.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func checkRepairFloor(t *testing.T, repo *store.Bolt, want time.Time) {
+	t.Helper()
+
+	floor, err := repo.RepairFloor()
+	if err != nil || !floor.Equal(want) {
+		t.Fatalf("RepairFloor = %v, %v, want %v, nil", floor, err, want)
+	}
+}
+
+func TestWatermarkRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	const name = "owner/repo"
+
+	path := filepath.Join(t.TempDir(), "store.db")
+	repo := open(t, path)
+	checkWatermark(t, repo, name, time.Time{})
+
+	first := time.Date(2026, time.November, 15, 12, 0, 0, 123, time.UTC)
+	later := first.Add(time.Hour)
+
+	for _, updated := range []time.Time{first, later} {
+		err := repo.SetWatermark(name, updated)
+		if err != nil {
+			t.Fatalf("SetWatermark: %v", err)
+		}
+
+		checkWatermark(t, repo, name, updated)
+	}
+
+	closeStore(t, repo)
+
+	repo = open(t, path)
+	checkWatermark(t, repo, name, later)
+	checkWatermark(t, repo, "other/repo", time.Time{})
+}
+
+func checkWatermark(t *testing.T, repo *store.Bolt, name string, want time.Time) {
+	t.Helper()
+
+	watermark, err := repo.Watermark(name)
+	if err != nil || !watermark.Equal(want) {
+		t.Fatalf("Watermark(%q) = %v, %v, want %v, nil", name, watermark, err, want)
+	}
+}

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Tony Burns
 
-// Package store keeps the service's durable state in one `bbolt` file. This
-// first part has the webhook queue, the delivery dedupe table, and the
-// store's creation time.
+// Package store keeps the service's durable state in one `bbolt` file. It holds
+// the webhook queue, the delivery dedupe table, milestone claims, repository
+// watermarks, the store's creation time, and the repair floor.
 //
 // Later slices add the dedupe bound (entries last 7 days, at most 200,000,
-// oldest evicted first), the dead-letter bucket, and the span ID, milestone,
-// watermark, and entity tag records. Until the bound is added, the dedupe table
-// grows without limit.
+// oldest evicted first), the dead-letter bucket, and the span ID and entity tag
+// records. Until the bound is added, the dedupe table grows without limit.
 package store
 
 import (
@@ -17,6 +16,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -39,7 +40,10 @@ const (
 	queueEventsBucket = "queue_events"
 	bodiesBucket      = "dedupe_bodies"
 	deliveriesBucket  = "dedupe_deliveries"
+	milestonesBucket  = "milestones"
+	watermarksBucket  = "watermarks"
 	createdKey        = "created"
+	repairFloorKey    = "repair_floor"
 )
 
 // ErrDeliveryReused is returned by Enqueue for a delivery ID that the dedupe
@@ -104,6 +108,13 @@ type Bolt struct {
 	now     func() time.Time
 	db      *bolt.DB
 	created time.Time
+
+	//exhaustruct:optional
+	floor struct {
+		value   *time.Time
+		resetAt *time.Time
+		mu      sync.Mutex
+	}
 }
 
 var _ Store = (*Bolt)(nil)
@@ -115,6 +126,7 @@ func Open(path string) (*Bolt, error) {
 }
 
 func open(path string, now func() time.Time) (*Bolt, error) {
+	resetFloor := os.Getenv("RECONCILE_FLOOR_RESET") == "1"
 	opts := *bolt.DefaultOptions
 	opts.Timeout = lockTimeout
 
@@ -123,12 +135,13 @@ func open(path string, now func() time.Time) (*Bolt, error) {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
 
-	var created time.Time
+	var created, started time.Time
 
 	err = file.Update(func(txn *bolt.Tx) error {
 		var initErr error
 
-		created, initErr = initialize(txn, now())
+		started = now().UTC()
+		created, initErr = initialize(txn, started)
 
 		return initErr
 	})
@@ -136,13 +149,20 @@ func open(path string, now func() time.Time) (*Bolt, error) {
 		return nil, errors.Join(fmt.Errorf("initialize store: %w", err), file.Close())
 	}
 
-	return &Bolt{db: file, now: now, created: created}, nil
+	store := &Bolt{db: file, now: now, created: created}
+	if resetFloor {
+		store.floor.resetAt = &started
+	}
+
+	return store, nil
 }
 
 // initialize creates the buckets and returns the stored creation time. When
 // the file has none yet, it stores first.
 func initialize(txn *bolt.Tx, first time.Time) (time.Time, error) {
-	for _, name := range []string{queueBucket, queueIDsBucket, queueEventsBucket, bodiesBucket, deliveriesBucket} {
+	for _, name := range []string{
+		queueBucket, queueIDsBucket, queueEventsBucket, bodiesBucket, deliveriesBucket, milestonesBucket, watermarksBucket,
+	} {
 		_, err := txn.CreateBucketIfNotExists([]byte(name))
 		if err != nil {
 			return time.Time{}, fmt.Errorf("create bucket %s: %w", name, err)
@@ -166,9 +186,9 @@ func initialize(txn *bolt.Tx, first time.Time) (time.Time, error) {
 		return first, nil
 	}
 
-	created, err := time.Parse(stampLayout, string(raw))
+	created, err := parseStamp(raw)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("creation time: %w: %w", ErrCorrupt, err)
+		return time.Time{}, fmt.Errorf("creation time: %w", err)
 	}
 
 	return created, nil
@@ -176,6 +196,117 @@ func initialize(txn *bolt.Tx, first time.Time) (time.Time, error) {
 
 // Created returns the time of the store's first open.
 func (b *Bolt) Created() time.Time { return b.created }
+
+// RepairFloor returns the time from which repairs can count milestones.
+// The first call records the current time if the store has no floor. If
+// RECONCILE_FLOOR_RESET was 1 at open, the first call records the open time.
+func (b *Bolt) RepairFloor() (time.Time, error) {
+	state := &b.floor
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.value != nil {
+		return *state.value, nil
+	}
+
+	var floor time.Time
+
+	err := b.db.Update(func(txn *bolt.Tx) error {
+		meta := txn.Bucket([]byte(metaBucket))
+		key := []byte(repairFloorKey)
+
+		raw := meta.Get(key)
+		if raw != nil && state.resetAt == nil {
+			var parseErr error
+
+			floor, parseErr = parseStamp(raw)
+
+			return parseErr
+		}
+
+		if state.resetAt == nil {
+			floor = b.now().UTC()
+		} else {
+			floor = *state.resetAt
+		}
+
+		return meta.Put(key, []byte(floor.Format(stampLayout)))
+	})
+	if err != nil {
+		return time.Time{}, fmt.Errorf("repair floor: %w", err)
+	}
+
+	state.value = &floor
+
+	return floor, nil
+}
+
+// ClaimMilestone records a new milestone with a disk sync. The key is the PR
+// node ID followed by a zero byte and the milestone name.
+func (b *Bolt) ClaimMilestone(key string) (bool, error) {
+	var claimed bool
+
+	err := b.db.Update(func(txn *bolt.Tx) error {
+		milestones := txn.Bucket([]byte(milestonesBucket))
+		if milestones.Get([]byte(key)) != nil {
+			return nil
+		}
+
+		claimed = true
+
+		return milestones.Put([]byte(key), []byte(b.now().UTC().Format(stampLayout)))
+	})
+	if err != nil {
+		return false, fmt.Errorf("claim milestone: %w", err)
+	}
+
+	return claimed, nil
+}
+
+// Watermark returns the latest update time stored for a repository full name.
+// A repository with no watermark returns the zero time.
+func (b *Bolt) Watermark(repository string) (time.Time, error) {
+	var watermark time.Time
+
+	err := b.db.View(func(txn *bolt.Tx) error {
+		raw := txn.Bucket([]byte(watermarksBucket)).Get([]byte(repository))
+		if raw == nil {
+			return nil
+		}
+
+		var parseErr error
+
+		watermark, parseErr = parseStamp(raw)
+
+		return parseErr
+	})
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read watermark: %w", err)
+	}
+
+	return watermark, nil
+}
+
+// SetWatermark stores an update time for a repository full name.
+func (b *Bolt) SetWatermark(repository string, updated time.Time) error {
+	err := b.db.Update(func(txn *bolt.Tx) error {
+		return txn.Bucket([]byte(watermarksBucket)).Put([]byte(repository), []byte(updated.UTC().Format(stampLayout)))
+	})
+	if err != nil {
+		return fmt.Errorf("set watermark: %w", err)
+	}
+
+	return nil
+}
+
+func parseStamp(raw []byte) (time.Time, error) {
+	stamp, err := time.Parse(stampLayout, string(raw))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: %w", ErrCorrupt, err)
+	}
+
+	return stamp, nil
+}
 
 // Close releases the file.
 func (b *Bolt) Close() error {
