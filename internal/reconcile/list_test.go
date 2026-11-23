@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,13 @@ type rig struct {
 func newRig(t *testing.T, handler func(http.ResponseWriter, *http.Request, string)) *rig {
 	t.Helper()
 
+	return newRigAt(t, "", handler)
+}
+
+// newRigAt serves the handler with the client's base URL ending in prefix.
+func newRigAt(t *testing.T, prefix string, handler func(http.ResponseWriter, *http.Request, string)) *rig {
+	t.Helper()
+
 	fake := &rig{
 		lister:   nil,
 		etags:    ghclient.NewETags(),
@@ -62,12 +70,12 @@ func newRig(t *testing.T, handler func(http.ResponseWriter, *http.Request, strin
 	}))
 	t.Cleanup(server.Close)
 
-	client, err := ghclient.New(server.URL, server.Client(), budget.New(), fakeTokens{}, fake.etags)
+	client, err := ghclient.New(server.URL+prefix, server.Client(), budget.New(), fakeTokens{}, fake.etags)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	base, err := url.Parse(server.URL)
+	base, err := url.Parse(server.URL + prefix)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,14 +231,17 @@ func TestRepositoriesSinglePageUsesTag(t *testing.T) {
 		}
 
 		resp.Header().Set("ETag", `"list"`)
-		write(t, resp, `{"total_count":1,"repositories":[{"id":7,"full_name":"o/r"}]}`)
+		write(t, resp, `{"repositories":[{"id":7,"full_name":"o/r"},{"id":8,"full_name":"o/s"}]}`)
 	})
 
 	for range 2 {
 		repos, truncated, err := fake.lister.Repositories(t.Context())
-		if err != nil || truncated || len(repos) != 1 || repos[0].FullName != "o/r" || repos[0].ID != 7 {
+		if err != nil || truncated || len(repos) != 2 || repos[0].FullName != "o/r" || repos[0].ID != 7 {
 			t.Fatalf("repos = %+v, truncated = %v, err = %v", repos, truncated, err)
 		}
+
+		// A caller editing its copy must not change the cached list.
+		repos[0] = repos[1]
 	}
 
 	if len(fake.requests) != 2 || fake.tags[repoPage] != `"list"` {
@@ -267,5 +278,55 @@ func TestRepositoriesTwoPagesSendNoTag(t *testing.T) {
 
 	if fake.tags[repoPage] != "" || fake.tags[repoPage+"&page=2"] != "" {
 		t.Errorf("tags = %v, want none", fake.tags)
+	}
+}
+
+func TestUpdatedWiderWindowReadsPastTag(t *testing.T) {
+	t.Parallel()
+
+	fake := newRig(t, func(resp http.ResponseWriter, req *http.Request, _ string) {
+		if req.Header.Get("If-None-Match") == `"page"` {
+			resp.WriteHeader(http.StatusNotModified)
+
+			return
+		}
+
+		resp.Header().Set("ETag", `"page"`)
+		write(t, resp, "["+item("N2", "2026-01-02T03:00:00Z", "2026-01-02T03:00:00Z", "")+","+
+			item("N1", "2026-01-01T12:00:00Z", "2026-01-01T12:00:00Z", "")+"]")
+	})
+
+	wide := opts(50)
+	wide.Stop = wide.Stop.Add(-24 * time.Hour)
+
+	for want, window := range []reconcile.WalkOptions{opts(50), wide} {
+		got, err := fake.lister.Updated(t.Context(), "o/r", window)
+		if err != nil || got.Unchanged || len(got.Items) != want+1 {
+			t.Fatalf("walk %d = %+v, err = %v", want, got, err)
+		}
+	}
+}
+
+func TestListerKeepsBasePath(t *testing.T) {
+	t.Parallel()
+
+	fake := newRigAt(t, "/api/v3/", func(resp http.ResponseWriter, req *http.Request, _ string) {
+		if req.URL.Path == "/api/v3/installation/repositories" {
+			write(t, resp, `{"repositories":[{"id":1,"full_name":"o/r"}]}`)
+
+			return
+		}
+
+		write(t, resp, "[]")
+	})
+
+	_, _, err := fake.lister.Repositories(t.Context())
+	if err == nil {
+		_, err = fake.lister.Updated(t.Context(), "o/r", opts(50))
+	}
+
+	if want := []string{"/api/v3/installation/repositories?per_page=100", "/api/v3/repos/o/r/pulls?" +
+		"state=all&sort=updated&direction=desc&per_page=100"}; err != nil || !slices.Equal(fake.requests, want) {
+		t.Errorf("requests = %v, err = %v", fake.requests, err)
 	}
 }

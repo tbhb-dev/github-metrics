@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/budget"
@@ -25,7 +26,7 @@ const (
 	// MaxRepoPages caps the repository list.
 	MaxRepoPages = 10
 
-	repositoriesPath = "/installation/repositories?per_page=100"
+	repositoriesPath = "installation/repositories?per_page=100"
 )
 
 // Getter is the part of ghclient.Client the lister uses.
@@ -92,6 +93,8 @@ type Lister struct {
 	client Getter
 	tags   Tags
 	base   *url.URL
+	// stops holds the stop time of each repository's last clean walk.
+	stops map[string]time.Time
 	// cached holds the last repository list, valid only when the last full
 	// read fit on one page and every page succeeded.
 	cached []Repository
@@ -99,10 +102,11 @@ type Lister struct {
 }
 
 // NewLister returns a lister. The base URL must be the one the client uses,
-// because the client keys its tags by the full URL. A page cap below one
-// reads one page.
+// because the client keys its tags by the full URL. A base path must end in a
+// slash, such as /api/v3/, so the request paths stay under it. A page cap below
+// one reads one page.
 func NewLister(client Getter, tags Tags, base *url.URL) *Lister {
-	return &Lister{client: client, tags: tags, base: base, cached: nil, valid: false}
+	return &Lister{client: client, tags: tags, base: base, cached: nil, valid: false, stops: map[string]time.Time{}}
 }
 
 type repositoryPage struct {
@@ -123,7 +127,7 @@ func (l *Lister) Repositories(ctx context.Context) ([]Repository, bool, error) {
 	l.valid = err == nil && single
 
 	if l.valid {
-		l.cached = repos
+		l.cached = slices.Clone(repos)
 
 		return repos, truncated, nil
 	}
@@ -138,13 +142,23 @@ func (l *Lister) Repositories(ctx context.Context) ([]Repository, bool, error) {
 // page sends a stored tag: a 304 there means no change since the last clean
 // walk. Each later page clears its tag first, because page contents shift as
 // pull requests update. Any walk that doesn't finish cleanly clears the
-// first-page tag, so the next walk reads the page in full.
+// first-page tag, so the next walk reads the page in full, and so does a walk
+// whose stop time reaches back further than the last clean one.
 func (l *Lister) Updated(ctx context.Context, repo string, opts WalkOptions) (Walked, error) {
-	first := "/repos/" + repo + "/pulls?state=all&sort=updated&direction=desc&per_page=100"
+	first := "repos/" + repo + "/pulls?state=all&sort=updated&direction=desc&per_page=100"
+
+	// A tag only proves the first page is unchanged, so it can't stand in for a
+	// deeper walk than the one that stored it.
+	if prev, ok := l.stops[repo]; !ok || opts.Stop.Before(prev) {
+		l.clear(first)
+	}
 
 	walked, err := l.walk(ctx, repo, first, opts)
 	if err != nil || walked.Truncated {
 		l.clear(first)
+		delete(l.stops, repo)
+	} else if !walked.Unchanged {
+		l.stops[repo] = opts.Stop
 	}
 
 	return walked, err
@@ -189,7 +203,7 @@ func (l *Lister) readRepositories(ctx context.Context) ([]Repository, bool, bool
 		}
 
 		if resp.NotModified() && page == 1 && l.valid {
-			return l.cached, false, true, nil
+			return slices.Clone(l.cached), false, true, nil
 		}
 
 		var decoded repositoryPage
