@@ -10,6 +10,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -171,9 +172,25 @@ func webhook(
 	log.InfoContext(ctx, "accepted delivery",
 		deliveryKey, oneLine(delivery),
 		eventKey, oneLine(event),
+		"repository", repositoryName(body.Bytes()),
 		"bytes", size,
 		"outcome", result)
 	resp.WriteHeader(http.StatusAccepted)
+}
+
+func repositoryName(body []byte) string {
+	var delivery struct {
+		Repository struct {
+			FullName string `json:"full_name"` //nolint:tagliatelle // GitHub uses this field name.
+		} `json:"repository"`
+	}
+
+	err := json.Unmarshal(body, &delivery)
+	if err != nil || delivery.Repository.FullName == "" {
+		return "unknown"
+	}
+
+	return oneLine(delivery.Repository.FullName)
 }
 
 func oneLine(s string) string {

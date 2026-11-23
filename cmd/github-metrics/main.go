@@ -183,12 +183,17 @@ func logRepairFloor(log *slog.Logger, ledger recorder.Ledger) error {
 }
 
 //nolint:ireturn // The worker accepts either recorder through its interface.
-func newRecorder(endpoint string, meter metric.Meter, ledger recorder.Ledger) (worker.Recorder, error) {
+func newRecorder(
+	endpoint string,
+	meter metric.Meter,
+	ledger recorder.Ledger,
+	log *slog.Logger,
+) (worker.Recorder, error) {
 	if endpoint == "" {
 		return noopRecorder{}, nil
 	}
 
-	consumer, err := recorder.New(meter, ledger)
+	consumer, err := recorder.New(meter, ledger, log)
 	if err != nil {
 		return nil, fmt.Errorf("create recorder: %w", err)
 	}

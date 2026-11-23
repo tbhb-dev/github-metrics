@@ -23,6 +23,7 @@ go_test(
         "closed_test.go",
         "export_test.go",
         "recorder_test.go",
+        "workflow_job_test.go",
     ],
     embed = [":recorder"],
     visibility = ["//:__pkg__"],

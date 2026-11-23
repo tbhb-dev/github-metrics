@@ -6,6 +6,7 @@ package recorder_test
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -35,7 +36,7 @@ func TestRecordCycleTime(t *testing.T) {
 
 	for _, test := range []cycleTimeTest{
 		{"created only", pullRequestEvent, closedState, created, ended, "", createdSource, true, 3600},
-		{"earlier trailer", pullRequestEvent, closedState, created, ended, trailer + earlier, startedAtSource, true, 7200},
+		{"earlier trailer", pullRequestEvent, closedState, created, ended, trailer + earlier, startedAtKey, true, 7200},
 		{"later trailer", pullRequestEvent, closedState, created, ended, trailer + ended, createdSource, true, 3600},
 		{closedState, pullRequestEvent, closedState, created, ended, "", createdSource, false, 3600},
 		{"end before start", pullRequestEvent, closedState, created, earlier, "", "", true, 0},
@@ -45,12 +46,12 @@ func TestRecordCycleTime(t *testing.T) {
 		},
 		{
 			"two trailers", pullRequestEvent, closedState, created, ended,
-			trailer + created + "\nAssisted-by: discard this text; started_at: " + earlier, startedAtSource, true, 7200,
+			trailer + created + "\nAssisted-by: discard this text; started_at: " + earlier, startedAtKey, true, 7200,
 		},
 		{"missing merged time", pullRequestEvent, closedState, created, "", "", "", true, 0},
 		{
 			"no body text retained", pullRequestEvent, closedState, created, ended,
-			"discard this text\n" + trailer + earlier, startedAtSource, true, 7200,
+			"discard this text\n" + trailer + earlier, startedAtKey, true, 7200,
 		},
 		{
 			"plain body ignored", pullRequestEvent, closedState, created, ended,
@@ -113,6 +114,14 @@ func newRecorder(t *testing.T) (*recorder.Recorder, *sdkmetric.ManualReader) {
 func newRecorderWith(t *testing.T, ledger recorder.Ledger) (*recorder.Recorder, *sdkmetric.ManualReader) {
 	t.Helper()
 
+	return newRecorderWithLogger(t, ledger, slog.New(slog.DiscardHandler))
+}
+
+func newRecorderWithLogger(
+	t *testing.T, ledger recorder.Ledger, log *slog.Logger,
+) (*recorder.Recorder, *sdkmetric.ManualReader) {
+	t.Helper()
+
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
@@ -123,7 +132,7 @@ func newRecorderWith(t *testing.T, ledger recorder.Ledger) (*recorder.Recorder, 
 		}
 	})
 
-	consumer, err := recorder.New(provider.Meter("test"), ledger)
+	consumer, err := recorder.New(provider.Meter("test"), ledger, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +236,7 @@ const (
 	reasonKey         = "reason"
 	droppedName       = "github.events.dropped"
 	closedState       = "closed"
-	startedAtSource   = "started_at"
+	startedAtKey      = "started_at"
 	createdSource     = "pr_created"
 	repositoryName    = "tbhb-dev/github-metrics"
 	pullRequestEvent  = "pull_request"
@@ -237,6 +246,11 @@ const (
 	eventsName        = "github.events"
 	repositoryKey     = "repository"
 	unknownRepository = "unknown"
+	buildName         = "build"
+	conclusionKey     = "conclusion"
+	headBranchKey     = "head_branch"
+	nameKey           = "name"
+	successResult     = "success"
 )
 
 func TestRecord(t *testing.T) {
@@ -269,8 +283,10 @@ func TestRecord(t *testing.T) {
 		},
 		{
 			map[string]map[string]string{
-				eventsName:                 {repositoryKey: unknownRepository, eventKey: checkRunEvent, actionKey: "completed"},
-				"github.check.conclusions": {repositoryKey: unknownRepository, "check_name": "build", "conclusion": "success"},
+				eventsName: {repositoryKey: unknownRepository, eventKey: checkRunEvent, actionKey: "completed"},
+				"github.check.conclusions": {
+					repositoryKey: unknownRepository, "check_name": buildName, conclusionKey: successResult,
+				},
 			},
 			"completed check", checkRunEvent,
 			`{"action":"completed","check_run":{"name":"build","conclusion":"success"}}`,
@@ -468,12 +484,7 @@ type mainRedStep struct {
 func TestRecordMainRed(t *testing.T) {
 	t.Parallel()
 
-	const (
-		mainBranch      = "main"
-		conclusionCheck = "conclusion"
-		completedAction = "completed"
-		failureResult   = "failure"
-	)
+	const mainBranch = "main"
 
 	for _, test := range []struct {
 		name  string
@@ -481,30 +492,30 @@ func TestRecordMainRed(t *testing.T) {
 	}{
 		{
 			"red on main",
-			[]mainRedStep{{completedAction, conclusionCheck, failureResult, mainBranch, mainBranch, 1, true}},
+			[]mainRedStep{{completedAction, conclusionKey, failureResult, mainBranch, mainBranch, 1, true}},
 		},
 		{
 			"timed out on main",
-			[]mainRedStep{{completedAction, conclusionCheck, "timed_out", mainBranch, mainBranch, 1, true}},
+			[]mainRedStep{{completedAction, conclusionKey, "timed_out", mainBranch, mainBranch, 1, true}},
 		},
 		{
 			"later green on main",
 			[]mainRedStep{
-				{completedAction, conclusionCheck, failureResult, mainBranch, mainBranch, 1, true},
-				{completedAction, conclusionCheck, "success", mainBranch, mainBranch, 0, true},
+				{completedAction, conclusionKey, failureResult, mainBranch, mainBranch, 1, true},
+				{completedAction, conclusionKey, successResult, mainBranch, mainBranch, 0, true},
 			},
 		},
 		{
 			"red on pull request branch",
-			[]mainRedStep{{completedAction, conclusionCheck, failureResult, "feat/pr", mainBranch, 0, false}},
+			[]mainRedStep{{completedAction, conclusionKey, failureResult, "feat/pr", mainBranch, 0, false}},
 		},
 		{
 			"non-conclusion check",
-			[]mainRedStep{{completedAction, "build", failureResult, mainBranch, mainBranch, 0, false}},
+			[]mainRedStep{{completedAction, buildName, failureResult, mainBranch, mainBranch, 0, false}},
 		},
 		{
 			"empty conclusion",
-			[]mainRedStep{{completedAction, conclusionCheck, "", mainBranch, mainBranch, 0, false}},
+			[]mainRedStep{{completedAction, conclusionKey, "", mainBranch, mainBranch, 0, false}},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -520,9 +531,9 @@ func TestRecordMainRed(t *testing.T) {
 					},
 					"action": step.action,
 					"check_run": map[string]any{
-						"name":        step.checkName,
-						"conclusion":  step.conclusion,
-						"check_suite": map[string]string{"head_branch": step.headBranch},
+						nameKey:       step.checkName,
+						conclusionKey: step.conclusion,
+						"check_suite": map[string]string{headBranchKey: step.headBranch},
 					},
 				})
 				if err != nil {
