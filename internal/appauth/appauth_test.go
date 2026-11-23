@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -102,8 +103,36 @@ func verifyRequest(t *testing.T, req *http.Request) {
 	}
 
 	if req.Header.Get("Accept") != "application/vnd.github+json" ||
+		req.Header.Get("Content-Type") != "application/json" ||
 		req.Header.Get("X-Github-Api-Version") != "2022-11-28" {
 		t.Error("missing API headers")
+	}
+}
+
+func verifyPermissions(t *testing.T, req *http.Request) {
+	t.Helper()
+
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Error("could not read the installation token request body")
+
+		return
+	}
+
+	var payload map[string]map[string]string
+
+	if json.Unmarshal(body, &payload) != nil {
+		t.Error("invalid installation token request body")
+
+		return
+	}
+
+	const readPermission = "read"
+
+	permissions := payload["permissions"]
+	if len(payload) != 1 || len(permissions) != 2 ||
+		permissions["metadata"] != readPermission || permissions["pull_requests"] != readPermission {
+		t.Error("expected only metadata and pull request read permissions")
 	}
 }
 
@@ -164,14 +193,21 @@ func TestTokenLifecycle(t *testing.T) {
 			var calls atomic.Int64
 
 			server := httptest.NewServer(http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+				verifyPermissions(t, req)
+
 				count := calls.Add(1)
 
 				requests <- req
 
 				resp.WriteHeader(http.StatusCreated)
 
-				_, _ = fmt.Fprintf(resp, `{"token":"installation-%d","expires_at":%q}`,
-					count, now.Add(time.Hour).Format(time.RFC3339))
+				// The response grants fewer permissions than the request asks for.
+				_, _ = fmt.Fprintf(
+					resp,
+					`{"token":"installation-%d","expires_at":%q,"permissions":{"metadata":"read"}}`,
+					count,
+					now.Add(time.Hour).Format(time.RFC3339),
+				)
 			}))
 			t.Cleanup(server.Close)
 
