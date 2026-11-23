@@ -4,10 +4,14 @@
 package telemetry_test
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/metric/noop"
 	"google.golang.org/protobuf/proto"
@@ -18,8 +22,29 @@ import (
 	"github.com/tbhb-dev/github-metrics/internal/telemetry"
 )
 
+const endpointEnv = "OTEL_EXPORTER_OTLP_ENDPOINT"
+
+func TestNewHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	client, err := telemetry.NewHTTPClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport has type %T, want *http.Transport", client.Transport)
+	}
+
+	const want = 45 * time.Second
+	if transport.IdleConnTimeout != want {
+		t.Errorf("idle connection timeout = %v, want %v", transport.IdleConnTimeout, want)
+	}
+}
+
 func TestSetupWithoutEndpoint(t *testing.T) {
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	t.Setenv(endpointEnv, "")
 
 	shutdown, meter, err := telemetry.Setup(t.Context(), "test-service", "test-version")
 	if err != nil {
@@ -42,7 +67,56 @@ func TestSetupExportsOnShutdown(t *testing.T) {
 
 	defer server.Close()
 
-	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", server.URL)
+	t.Setenv(endpointEnv, server.URL)
+
+	shutdown := recordTestMetric(t)
+
+	err := shutdown(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := len(requests); got != 1 {
+		t.Fatalf("export requests = %d, want 1", got)
+	}
+
+	checkExport(t, <-requests)
+}
+
+func TestSetupRetriesConnectionClose(t *testing.T) {
+	for _, test := range []struct {
+		wantErr     error
+		name        string
+		alwaysClose bool
+	}{
+		{name: "first connection closes", alwaysClose: false, wantErr: nil},
+		{name: "every connection closes", alwaysClose: true, wantErr: io.EOF},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var attempts atomic.Int32
+
+			server := retryServer(t, &attempts, test.alwaysClose)
+			defer server.Close()
+
+			t.Setenv(endpointEnv, server.URL)
+
+			shutdown := recordTestMetric(t)
+			err := shutdown(t.Context())
+
+			if !errors.Is(err, test.wantErr) {
+				t.Errorf("shutdown error = %v, want %v", err, test.wantErr)
+			}
+
+			if got := attempts.Load(); got != 2 {
+				t.Errorf("export requests = %d, want 2", got)
+			}
+		})
+	}
+}
+
+func recordTestMetric(t *testing.T) func(context.Context) error {
+	t.Helper()
+
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE", "delta")
 	t.Setenv("OTEL_METRIC_EXPORT_INTERVAL", "3600000")
@@ -59,16 +133,40 @@ func TestSetupExportsOnShutdown(t *testing.T) {
 
 	counter.Add(t.Context(), 1)
 
-	shutdownErr := shutdown(t.Context())
-	if shutdownErr != nil {
-		t.Fatal(shutdownErr)
+	return shutdown
+}
+
+func retryServer(t *testing.T, attempts *atomic.Int32, alwaysClose bool) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		attempt := attempts.Add(1)
+
+		_, err := io.Copy(io.Discard, request.Body)
+		if err != nil {
+			t.Error(err)
+		}
+
+		if attempt == 1 || alwaysClose {
+			closeConnection(t, writer)
+		}
+	}))
+}
+
+func closeConnection(t *testing.T, writer http.ResponseWriter) {
+	t.Helper()
+
+	conn, _, err := http.NewResponseController(writer).Hijack()
+	if err != nil {
+		t.Error(err)
+
+		return
 	}
 
-	if got := len(requests); got != 1 {
-		t.Fatalf("export requests = %d, want 1", got)
+	closeErr := conn.Close()
+	if closeErr != nil {
+		t.Error(closeErr)
 	}
-
-	checkExport(t, <-requests)
 }
 
 func exportServer(t *testing.T, requests chan<- []byte) *httptest.Server {
