@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -51,15 +52,16 @@ type Config struct {
 
 // Source caches tokens. Make one with New.
 type Source struct {
-	expires  time.Time
-	http     *http.Client
-	now      func() time.Time
-	log      *slog.Logger
-	key      *rsa.PrivateKey
-	endpoint string
-	token    string
-	appID    int64
-	mu       sync.Mutex
+	expires    time.Time
+	http       *http.Client
+	now        func() time.Time
+	log        *slog.Logger
+	key        *rsa.PrivateKey
+	endpoint   string
+	token      string
+	appID      int64
+	generation atomic.Uint64
+	mu         sync.Mutex
 }
 
 // New parses the private key without sending a request. It accepts an RSA key
@@ -106,10 +108,11 @@ func New(cfg Config) (*Source, error) {
 		key:  key,
 		endpoint: strings.TrimRight(base.String(), "/") + "/app/installations/" +
 			strconv.FormatInt(cfg.InstallationID, 10) + "/access_tokens",
-		token:   "",
-		expires: time.Time{},
-		appID:   cfg.AppID,
-		mu:      sync.Mutex{},
+		token:      "",
+		expires:    time.Time{},
+		appID:      cfg.AppID,
+		generation: atomic.Uint64{},
+		mu:         sync.Mutex{},
 	}, nil
 }
 
@@ -163,7 +166,8 @@ func parseKey(data []byte) (*rsa.PrivateKey, error) {
 	return key, nil
 }
 
-// Token returns the cached token until less than five minutes remain.
+// Token refreshes the cached token when less than five minutes remain.
+// If the refresh fails, Token returns the cached token while it is still valid.
 func (s *Source) Token(ctx context.Context) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -172,13 +176,34 @@ func (s *Source) Token(ctx context.Context) (string, error) {
 		return s.token, nil
 	}
 
-	return s.fetch(ctx)
+	token, err := s.fetch(ctx)
+	if err == nil {
+		return token, nil
+	}
+
+	if s.token != "" && s.expires.After(s.now()) {
+		return s.token, nil
+	}
+
+	s.token = ""
+	s.expires = time.Time{}
+
+	return "", err
 }
 
-// Renew discards the cached token and fetches a new one.
+// Renew fetches a new token or reuses a valid token fetched while it waited.
 func (s *Source) Renew(ctx context.Context) (string, error) {
+	generation := s.generation.Load()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if generation != s.generation.Load() && s.token != "" && s.expires.After(s.now()) {
+		return s.token, nil
+	}
+
+	s.token = ""
+	s.expires = time.Time{}
 
 	return s.fetch(ctx)
 }
@@ -215,9 +240,6 @@ func (s *Source) failure(ctx context.Context, stage string, status int) (string,
 }
 
 func (s *Source) fetch(ctx context.Context) (string, error) {
-	s.token = ""
-	s.expires = time.Time{}
-
 	assertion, err := s.assertion()
 	if err != nil {
 		return s.failure(ctx, "sign", 0)
@@ -240,6 +262,9 @@ func (s *Source) fetch(ctx context.Context) (string, error) {
 	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusCreated {
+		//nolint:errcheck // The response status determines the error.
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, maxBody))
+
 		return s.failure(ctx, "status", res.StatusCode)
 	}
 
@@ -261,6 +286,7 @@ func (s *Source) fetch(ctx context.Context) (string, error) {
 
 	s.token = reply.Token
 	s.expires = reply.ExpiresAt
+	s.generation.Add(1)
 
 	return s.token, nil
 }
