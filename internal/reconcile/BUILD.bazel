@@ -9,6 +9,7 @@ repo_files()
 go_library(
     name = "reconcile",
     srcs = [
+        "events.go",
         "list.go",
         "loop.go",
         "run.go",
@@ -27,6 +28,7 @@ go_library(
 go_test(
     name = "reconcile_test",
     srcs = [
+        "events_test.go",
         "list_test.go",
         "loop_test.go",
         "run_test.go",
