@@ -137,6 +137,7 @@ func TestLoopReportsPasses(t *testing.T) {
 			result := reconcile.RunResult{
 				Result: statuses[calls], Repositories: 3, Pages: 4, NotModified: 1, Truncated: 1,
 				Recorded: 2, AlreadyCounted: 5, TooOld: 0, PreFloor: 0, Skipped: 0,
+				EndedRecorded: 0, EndedAlreadyCounted: 0, EndedTooOld: 0, EndedPreFloor: 0, Ambiguous: 0,
 			}
 			calls++
 
