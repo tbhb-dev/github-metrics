@@ -6,6 +6,7 @@ package main
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
@@ -14,10 +15,25 @@ import (
 	"github.com/tbhb-dev/github-metrics/internal/recorder"
 )
 
+type stubLedger struct{}
+
+func (stubLedger) Created() time.Time                  { return time.Time{} }
+func (stubLedger) RepairFloor() (time.Time, error)     { return time.Time{}, nil }
+func (stubLedger) ClaimMilestone(string) (bool, error) { return true, nil }
+
+func TestNewRecorderWithoutLedger(t *testing.T) {
+	t.Parallel()
+
+	_, err := newRecorder("configured", nil, nil)
+	if !errors.Is(err, recorder.ErrNoLedger) {
+		t.Fatalf("newRecorder error = %v, want %v", err, recorder.ErrNoLedger)
+	}
+}
+
 func TestNewRecorderWithoutEndpoint(t *testing.T) {
 	t.Parallel()
 
-	consumer, err := newRecorder("", nil)
+	consumer, err := newRecorder("", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +61,7 @@ func TestNewRecorderWithEndpoint(t *testing.T) {
 		}
 	})
 
-	consumer, err := newRecorder("configured", provider.Meter("test"))
+	consumer, err := newRecorder("configured", provider.Meter("test"), stubLedger{})
 	if err != nil {
 		t.Fatal(err)
 	}
