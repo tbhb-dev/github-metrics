@@ -81,6 +81,8 @@ type Walked struct {
 	Newest time.Time
 	// Items holds the pull requests with a close time, newest update first.
 	Items []ClosedPR
+	// Pages counts fetched pull request pages, including a 304 or a decode failure.
+	Pages int
 	// Truncated is true when the page cap ended the walk before the stop time.
 	Truncated bool
 	// Unchanged is true when the first page answered 304.
@@ -234,18 +236,22 @@ func (l *Lister) walk(ctx context.Context, repo, first string, opts WalkOptions)
 	for page := 1; ; page++ {
 		resp, err := l.fetch(ctx, opts.Priority, target, page)
 		if err != nil {
-			return Walked{}, err
+			return Walked{Newest: time.Time{}, Items: nil, Pages: walked.Pages, Truncated: false, Unchanged: false}, err
 		}
 
+		walked.Pages++
 		if resp.NotModified() && page == 1 {
-			return Walked{Newest: time.Time{}, Items: nil, Truncated: false, Unchanged: true}, nil
+			walked.Unchanged = true
+
+			return walked, nil
 		}
 
 		var decoded []ClosedPR
 
 		err = json.Unmarshal(resp.Body, &decoded)
 		if err != nil {
-			return Walked{}, fmt.Errorf("decode pull requests: %w", err)
+			return Walked{Newest: time.Time{}, Items: nil, Pages: walked.Pages, Truncated: false, Unchanged: false},
+				fmt.Errorf("decode pull requests: %w", err)
 		}
 
 		if absorb(&walked, repo, decoded, opts.Stop) || resp.Next == "" {
@@ -253,7 +259,10 @@ func (l *Lister) walk(ctx context.Context, repo, first string, opts WalkOptions)
 		}
 
 		if page >= opts.MaxPages {
-			return Walked{Newest: time.Time{}, Items: walked.Items, Truncated: true, Unchanged: false}, nil
+			walked.Newest = time.Time{}
+			walked.Truncated = true
+
+			return walked, nil
 		}
 
 		target = resp.Next
