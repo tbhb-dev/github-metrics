@@ -8,11 +8,18 @@ repo_files()
 
 go_library(
     name = "github-metrics_lib",
-    srcs = ["main.go"],
+    srcs = [
+        "main.go",
+        "reconciler.go",
+    ],
     importpath = "github.com/tbhb-dev/github-metrics/cmd/github-metrics",
     visibility = ["//:__pkg__"],
     deps = [
+        "//internal/appauth",
+        "//internal/budget",
+        "//internal/ghclient",
         "//internal/receiver",
+        "//internal/reconcile",
         "//internal/recorder",
         "//internal/store",
         "//internal/telemetry",

@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright Tony Burns
 
-// Command github-metrics runs the webhook receiver and queue worker.
+// Command github-metrics runs the webhook receiver, queue worker and optional reconciler.
 //
 // WEBHOOK_SECRET_FILE names a file that contains the App's webhook secret.
 //
 // STORE_FILE names the store file for the webhook queue and dedupe table.
+//
+// OTEL_EXPORTER_OTLP_ENDPOINT enables metric export and is required for reconciliation.
+// GITHUB_APP_ID and GITHUB_INSTALLATION_ID are positive integers that identify
+// the GitHub App and its installation. GITHUB_APP_KEY_FILE names the App's
+// private key file. Set all three to configure reconciliation.
+// GITHUB_API_URL is the GitHub API base and defaults to https://api.github.com.
 //
 // LISTEN_ADDR is the listen address and defaults to :8080. The health check
 // probes that address, or loopback when its host is a wildcard.
@@ -66,14 +72,23 @@ func main() {
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	err := run(addr, log)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	err := run(ctx, addr, log)
+
+	stop()
+
 	if err != nil {
 		log.Error("exit", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(addr string, log *slog.Logger) error {
+func run(ctx context.Context, addr string, log *slog.Logger) error {
+	cfg, err := reconcilerConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
+
 	file := os.Getenv("WEBHOOK_SECRET_FILE")
 	if file == "" {
 		return errNoSecretFile
@@ -106,7 +121,7 @@ func run(addr string, log *slog.Logger) error {
 
 	srv := receiver.NewServer(addr, receiver.Handler(secret, repo, log))
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 
 	shutdownTelemetry, meter, err := telemetry.Setup(ctx, "github-metrics", version)
@@ -116,15 +131,13 @@ func run(addr string, log *slog.Logger) error {
 
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 
-	consumer, err := newRecorder(endpoint, meter, repo)
+	consumer, loop, err := newConsumers(ctx, endpoint, cfg, meter, repo, log)
 	if err != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 		defer cancel()
 
 		return errors.Join(err, shutdownTelemetry(shutdownCtx), repo.Close())
 	}
-
-	log.InfoContext(ctx, "recorder mode", "configured", endpoint != "")
 
 	workerErr := make(chan error, 1)
 
@@ -134,24 +147,28 @@ func run(addr string, log *slog.Logger) error {
 		stop()
 	}()
 
+	reconcileErr := startReconciler(ctx, loop, stop)
+
 	serveErr := make(chan error, 1)
 
 	go func() { serveErr <- srv.ListenAndServe() }()
 
-	log.Info("listening", "addr", addr)
+	log.InfoContext(ctx, "listening", "addr", addr)
 
 	select {
 	case err = <-serveErr:
-		// Shut down the worker before closing its store.
+		// Shut down the worker and reconciler before closing their store.
 	case <-ctx.Done():
 	}
 
 	stop()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
 
-	return errors.Join(err, srv.Shutdown(shutdownCtx), <-workerErr, shutdownTelemetry(shutdownCtx), repo.Close())
+	return errors.Join(
+		err, srv.Shutdown(shutdownCtx), <-workerErr, <-reconcileErr, shutdownTelemetry(shutdownCtx), repo.Close(),
+	)
 }
 
 func logRepairFloor(log *slog.Logger, ledger recorder.Ledger) error {

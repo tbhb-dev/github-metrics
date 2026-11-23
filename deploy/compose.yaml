@@ -21,6 +21,8 @@
 # source, secrets/github_app_key, stays owned by the deploy account with mode
 # 0600. up.sh prepares secrets/runtime/github_app_key with uid 65532 and mode
 # 0400 inside a root-owned mode-0700 directory before Compose mounts it.
+# Set both GitHub IDs to configure reconciliation. Compose passes the mounted
+# key path to the service when GITHUB_APP_ID is set.
 # The named `store` volume mounts at `/var/lib/github-metrics`, which the image
 # creates owned by 65532:65532 so the receiver can write its store file while
 # the root filesystem stays read-only.
@@ -53,7 +55,10 @@ services:
       LISTEN_ADDR: ":8080"
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       STORE_FILE: /var/lib/github-metrics/store.db
-      GITHUB_APP_KEY_FILE: /run/secrets/github_app_key
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_INSTALLATION_ID: ${GITHUB_INSTALLATION_ID:-}
+      GITHUB_API_URL: ${GITHUB_API_URL:-}
+      GITHUB_APP_KEY_FILE: ${GITHUB_APP_ID:+/run/secrets/github_app_key}
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
     volumes:
       - store:/var/lib/github-metrics
