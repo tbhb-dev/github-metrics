@@ -61,6 +61,8 @@ type ClosedPR struct {
 	// Merged is true when the item has a merge time, since a list item has no
 	// merged field.
 	Merged bool `json:"-"`
+	// Number is the pull request number, which names its issue events.
+	Number int `json:"number"`
 }
 
 // WalkOptions bounds one walk.
@@ -81,6 +83,8 @@ type Walked struct {
 	Newest time.Time
 	// Items holds the pull requests with a close time, newest update first.
 	Items []ClosedPR
+	// Pages is the number of pages read.
+	Pages int
 	// Truncated is true when the page cap ended the walk before the stop time.
 	Truncated bool
 	// Unchanged is true when the first page answered 304.
@@ -238,7 +242,7 @@ func (l *Lister) walk(ctx context.Context, repo, first string, opts WalkOptions)
 		}
 
 		if resp.NotModified() && page == 1 {
-			return Walked{Newest: time.Time{}, Items: nil, Truncated: false, Unchanged: true}, nil
+			return Walked{Newest: time.Time{}, Items: nil, Pages: 1, Truncated: false, Unchanged: true}, nil
 		}
 
 		var decoded []ClosedPR
@@ -248,12 +252,14 @@ func (l *Lister) walk(ctx context.Context, repo, first string, opts WalkOptions)
 			return Walked{}, fmt.Errorf("decode pull requests: %w", err)
 		}
 
+		walked.Pages = page
+
 		if absorb(&walked, repo, decoded, opts.Stop) || resp.Next == "" {
 			return walked, nil
 		}
 
 		if page >= opts.MaxPages {
-			return Walked{Newest: time.Time{}, Items: walked.Items, Truncated: true, Unchanged: false}, nil
+			return Walked{Newest: time.Time{}, Items: walked.Items, Pages: page, Truncated: true, Unchanged: false}, nil
 		}
 
 		target = resp.Next
