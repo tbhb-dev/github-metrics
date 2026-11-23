@@ -116,8 +116,8 @@ func webhook(
 	case <-timer.C:
 		log.ErrorContext(ctx, rejectedDelivery,
 			reasonKey, "no free slot after wait",
-			deliveryKey, delivery,
-			eventKey, event)
+			deliveryKey, oneLine(delivery),
+			eventKey, oneLine(event))
 		rejectBusy(resp)
 
 		return
@@ -169,8 +169,8 @@ func webhook(
 	}
 
 	log.InfoContext(ctx, "accepted delivery",
-		deliveryKey, delivery,
-		eventKey, event,
+		deliveryKey, oneLine(delivery),
+		eventKey, oneLine(event),
 		"bytes", size,
 		"outcome", result)
 	resp.WriteHeader(http.StatusAccepted)
