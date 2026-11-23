@@ -13,6 +13,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -136,6 +137,84 @@ func TestResponseFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRejectedResponseAllowsConnectionReuse(t *testing.T) {
+	t.Parallel()
+
+	var connections atomic.Int64
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(resp http.ResponseWriter, _ *http.Request) {
+		resp.WriteHeader(http.StatusUnauthorized)
+
+		_, err := resp.Write([]byte(failureBody))
+		if err != nil {
+			t.Error("write response failed")
+		}
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections.Add(1)
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+
+	var logs bytes.Buffer
+
+	cfg := config(t, server, time.Now)
+	cfg.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	source := newSource(t, cfg)
+
+	checkFailure(t, source, &logs, "status", http.StatusUnauthorized)
+	logs.Reset()
+	checkFailure(t, source, &logs, "status", http.StatusUnauthorized)
+
+	if connections.Load() != 1 {
+		t.Error("rejected response prevented connection reuse")
+	}
+}
+
+func TestTokenRefreshFailureKeepsValidCache(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	expires := start.Add(time.Hour)
+
+	var (
+		calls   atomic.Int64
+		elapsed atomic.Int64
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(resp http.ResponseWriter, _ *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			resp.WriteHeader(http.StatusCreated)
+
+			_, _ = fmt.Fprintf(resp, `{"token":"cached-token","expires_at":%q}`, expires.Format(time.RFC3339))
+
+			return
+		case 3:
+			elapsed.Store(int64(time.Hour))
+		}
+
+		resp.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(server.Close)
+
+	var logs bytes.Buffer
+
+	cfg := config(t, server, func() time.Time { return start.Add(time.Duration(elapsed.Load())) })
+	cfg.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	source := newSource(t, cfg)
+
+	checkToken(t, source.Token, "cached-token")
+	elapsed.Store(int64(time.Hour - time.Minute))
+	checkToken(t, source.Token, "cached-token")
+	checkLog(t, &logs, "status", http.StatusForbidden)
+
+	logs.Reset()
+	checkFailure(t, source, &logs, "status", http.StatusForbidden)
 }
 
 func TestExpiryBound(t *testing.T) {
