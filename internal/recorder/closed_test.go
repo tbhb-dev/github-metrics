@@ -355,6 +355,72 @@ func TestRecordReopened(t *testing.T) {
 	}
 }
 
+func TestRecordReopenedWithRepair(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name                       string
+		wantCycles                 []string
+		createdOffset, endedOffset time.Duration
+		repairFirst                bool
+	}{
+		{"before floor, reopen first", nil, -time.Hour, -time.Minute, false},
+		{"before floor, repair first", nil, -time.Hour, -time.Minute, true},
+		{"after floor, reopen first", []string{closedState}, time.Minute, time.Hour, false},
+		{"after floor, repair first", []string{closedState}, time.Minute, time.Hour, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			ledger := newLedger(nil)
+			consumer, reader := newRecorderWith(t, ledger)
+			repair := closedPR(func(pr *recorder.ClosedPR) {
+				pr.Repair = true
+				pr.CreatedAt = ledger.floor.Add(test.createdOffset)
+				pr.EndedAt = ledger.floor.Add(test.endedOffset)
+				pr.EndedState = closedState
+			})
+
+			const reopened = "reopened"
+
+			created := repair.CreatedAt.Format(time.RFC3339)
+			if !test.repairFirst {
+				deliverTestPullRequest(t, consumer, created, reopened, "")
+			}
+
+			outcome, err := consumer.RecordClosed(t.Context(), repair)
+			if err != nil || outcome.Merged != recorder.ResultRecorded {
+				t.Fatalf("repair = %v, %v, want a recorded merge", outcome, err)
+			}
+
+			if test.repairFirst {
+				deliverTestPullRequest(t, consumer, created, reopened, "")
+			}
+
+			mergeTime := repair.MergedAt.Format(time.RFC3339)
+			merge := `,"merged":true,"merged_at":"` + mergeTime + `","closed_at":"` + mergeTime + `"`
+			deliverTestPullRequest(t, consumer, created, closedState, merge)
+
+			merges, cycles := observations(t, reader)
+			if merges != 1 || !slices.Equal(cycles, test.wantCycles) {
+				t.Fatalf("merges = %d, cycle states = %v, want 1 merge and %v", merges, cycles, test.wantCycles)
+			}
+		})
+	}
+}
+
+func deliverTestPullRequest(t *testing.T, consumer *recorder.Recorder, created, action, extra string) {
+	t.Helper()
+
+	body := `{"repository":{"full_name":"` + repositoryName + `"},"action":"` + action +
+		`","pull_request":{"node_id":"` + nodeID + `","created_at":"` + created + `"` + extra + `}}`
+
+	err := consumer.Record(t.Context(), pullRequestEvent, []byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRecordClaimsBeforeAnyAdd(t *testing.T) {
 	t.Parallel()
 
