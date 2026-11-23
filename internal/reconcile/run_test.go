@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"slices"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/budget"
@@ -33,13 +34,14 @@ type runClock time.Time
 func (clock runClock) Now() time.Time { return time.Time(clock) }
 
 type runFake struct {
-	readErr, writeErr    error
-	end                  func(reconcile.ClosedPR) (reconcile.End, error)
-	walk                 func(string, reconcile.WalkOptions) (reconcile.Walked, error)
-	record               func(recorder.ClosedPR) (recorder.Outcome, error)
-	watermarks           map[string]time.Time
-	repos, walked, wrote []string
-	cleared              []string
+	readErr, writeErr, listErr error
+	end                        func(reconcile.ClosedPR) (reconcile.End, error)
+	walk                       func(string, reconcile.WalkOptions) (reconcile.Walked, error)
+	record                     func(recorder.ClosedPR) (recorder.Outcome, error)
+	watermarks                 map[string]time.Time
+	repos, walked, wrote       []string
+	cleared                    []string
+	listTruncated              bool
 }
 
 // ended is the first end the fake events reads give: a plain close.
@@ -67,7 +69,7 @@ func (fake *runFake) Repositories(context.Context) ([]reconcile.Repository, bool
 		repos = append(repos, reconcile.Repository{FullName: name, ID: 0})
 	}
 
-	return repos, false, nil
+	return repos, fake.listTruncated, fake.listErr
 }
 
 func (fake *runFake) Updated(_ context.Context, repo string, opts reconcile.WalkOptions) (reconcile.Walked, error) {
@@ -181,6 +183,7 @@ func TestRunRepairsMerges(t *testing.T) {
 type failure struct {
 	err    error
 	result reconcile.RunStatus
+	stop   bool
 }
 
 // failures lists the read errors of design section 8 and the run result of each.
@@ -188,14 +191,14 @@ func failures() []failure {
 	decodeErr := json.Unmarshal([]byte("["), new([]reconcile.ClosedPR))
 
 	return []failure{
-		{ghclient.ErrTokenSource, reconcile.RunAuthFailed},
-		{&ghclient.StatusError{Path: "", Status: http.StatusUnauthorized}, reconcile.RunAuthFailed},
-		{&ghclient.StatusError{Path: "", Status: http.StatusForbidden}, reconcile.RunPartial},
-		{&ghclient.StatusError{Path: "", Status: http.StatusNotFound}, reconcile.RunPartial},
-		{ghclient.ErrGaveUp, reconcile.RunPartial},
-		{context.DeadlineExceeded, reconcile.RunPartial},
-		{ghclient.ErrBodyTooLarge, reconcile.RunPartial},
-		{decodeErr, reconcile.RunPartial},
+		{ghclient.ErrTokenSource, reconcile.RunAuthFailed, true},
+		{&ghclient.StatusError{Path: "", Status: http.StatusUnauthorized}, reconcile.RunAuthFailed, true},
+		{&ghclient.StatusError{Path: "", Status: http.StatusForbidden}, reconcile.RunPartial, false},
+		{&ghclient.StatusError{Path: "", Status: http.StatusNotFound}, reconcile.RunPartial, false},
+		{ghclient.ErrGaveUp, reconcile.RunPartial, true},
+		{context.DeadlineExceeded, reconcile.RunPartial, true},
+		{ghclient.ErrBodyTooLarge, reconcile.RunPartial, false},
+		{decodeErr, reconcile.RunPartial, false},
 	}
 }
 
@@ -209,8 +212,9 @@ func TestRunWalkFailure(t *testing.T) {
 			var fake runFake
 
 			now := time.Now()
+			previous := now.Add(-time.Hour)
 			fake.repos = []string{firstRepo, nextRepo, lastRepo}
-			fake.watermarks = make(map[string]time.Time)
+			fake.watermarks = map[string]time.Time{nextRepo: previous}
 			fake.walk = func(repo string, _ reconcile.WalkOptions) (reconcile.Walked, error) {
 				walked := reconcile.Walked{Newest: now, Items: nil, Pages: 1, Truncated: false, Unchanged: false}
 				if repo == nextRepo {
@@ -223,13 +227,15 @@ func TestRunWalkFailure(t *testing.T) {
 			got, err := reconcile.Run(t.Context(), &fake, &fake, &fake, &fake, runClock(now))
 
 			walked, wrote := fake.repos, []string{firstRepo, lastRepo}
-			if test.result == reconcile.RunAuthFailed {
+			if test.stop {
 				walked, wrote = walked[:2], wrote[:1]
 			}
 
 			if err != nil || got.Result != test.result || got.Repositories != len(walked) || got.Pages != len(walked) ||
-				!slices.Equal(fake.walked, walked) || !slices.Equal(fake.wrote, wrote) {
-				t.Errorf("result = %+v, err = %v, walked = %v, wrote = %v", got, err, fake.walked, fake.wrote)
+				!slices.Equal(fake.walked, walked) || !slices.Equal(fake.wrote, wrote) ||
+				!fake.watermarks[nextRepo].Equal(previous) {
+				t.Errorf("result = %+v, err = %v, walked = %v, wrote = %v, watermarks = %v",
+					got, err, fake.walked, fake.wrote, fake.watermarks)
 			}
 		})
 	}
@@ -280,6 +286,43 @@ func TestRunStoreErrors(t *testing.T) {
 				t.Errorf("result = %+v, err = %v, walked = %v, wrote = %v", got, err, fake.walked, fake.wrote)
 			}
 		})
+	}
+}
+
+func TestRunRetriesWatermarkWrite(t *testing.T) {
+	t.Parallel()
+
+	const repo = "o/r"
+
+	now := time.Date(2026, time.January, 2, 4, 0, 0, 0, time.UTC)
+	servePulls := tagged(t, `"first"`, "["+item("open", now.Format(time.RFC3339), "", "")+"]")
+	rig := newRig(t, func(resp http.ResponseWriter, req *http.Request, host string) {
+		if req.URL.RequestURI() == repoPage {
+			write(t, resp, `{"repositories":[{"full_name":"o/r"}]}`)
+
+			return
+		}
+
+		servePulls(resp, req, host)
+	})
+
+	var fake runFake
+
+	previous := now.Add(-time.Hour)
+	fake.watermarks = map[string]time.Time{repo: previous}
+	fake.writeErr = io.ErrClosedPipe
+
+	got, err := reconcile.Run(t.Context(), rig.lister, &fake, &fake, &fake, runClock(now))
+	if !errors.Is(err, io.ErrClosedPipe) || got.Result != reconcile.RunPartial ||
+		!fake.watermarks[repo].Equal(previous) || rig.etags.Get(rig.base+firstPage) != "" {
+		t.Fatalf("first pass = %+v, err = %v, watermarks = %v", got, err, fake.watermarks)
+	}
+
+	fake.writeErr = nil
+
+	got, err = reconcile.Run(t.Context(), rig.lister, &fake, &fake, &fake, runClock(now))
+	if err != nil || got.Result != reconcile.RunOK || got.NotModified != 0 || !fake.watermarks[repo].Equal(now) {
+		t.Errorf("retry = %+v, err = %v, watermarks = %v", got, err, fake.watermarks)
 	}
 }
 
@@ -371,8 +414,9 @@ func TestRunEventsFailure(t *testing.T) {
 			var fake runFake
 
 			now := time.Now()
-			fake.repos = []string{firstRepo, nextRepo}
-			fake.watermarks = make(map[string]time.Time)
+			previous := now.Add(-time.Hour)
+			fake.repos = []string{firstRepo, nextRepo, lastRepo}
+			fake.watermarks = map[string]time.Time{nextRepo: previous}
 			fake.walk = func(repo string, _ reconcile.WalkOptions) (reconcile.Walked, error) {
 				item := closedItem(now, true)
 				item.Repository = repo
@@ -387,7 +431,7 @@ func TestRunEventsFailure(t *testing.T) {
 			}
 			fake.end = func(item reconcile.ClosedPR) (reconcile.End, error) {
 				end := ended(item)
-				if item.Repository == firstRepo {
+				if item.Repository != nextRepo {
 					return end, nil
 				}
 
@@ -398,9 +442,74 @@ func TestRunEventsFailure(t *testing.T) {
 			}
 
 			got, err := reconcile.Run(t.Context(), &fake, &fake, &fake, &fake, runClock(now))
-			if err != nil || got.Result != test.result || got.Pages != 4 || got.Recorded != 1 ||
-				!slices.Equal(fake.wrote, []string{firstRepo}) || !slices.Equal(fake.cleared, []string{nextRepo}) {
-				t.Errorf("result = %+v, err = %v, wrote = %v, cleared = %v", got, err, fake.wrote, fake.cleared)
+
+			walked, wrote := fake.repos, []string{firstRepo, lastRepo}
+			if test.stop {
+				walked, wrote = walked[:2], wrote[:1]
+			}
+
+			if err != nil || got.Result != test.result || got.Repositories != len(walked) ||
+				got.Pages != 2*len(walked) || got.Recorded != len(wrote) || !slices.Equal(fake.walked, walked) ||
+				!slices.Equal(fake.wrote, wrote) || !slices.Equal(fake.cleared, []string{nextRepo}) ||
+				!fake.watermarks[nextRepo].Equal(previous) {
+				t.Errorf("result = %+v, err = %v, walked = %v, wrote = %v, cleared = %v, watermarks = %v",
+					got, err, fake.walked, fake.wrote, fake.cleared, fake.watermarks)
+			}
+		})
+	}
+}
+
+func TestRunDeadlineBetweenRepositories(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+
+		var fake runFake
+
+		fake.repos = []string{firstRepo, nextRepo}
+		fake.walk = func(repo string, opts reconcile.WalkOptions) (reconcile.Walked, error) {
+			<-ctx.Done()
+
+			return walkOf(time.Time{})(repo, opts)
+		}
+
+		got, err := reconcile.Run(ctx, &fake, &fake, &fake, &fake, runClock(time.Now()))
+		if err != nil || got.Result != reconcile.RunPartial || got.Repositories != 1 ||
+			!slices.Equal(fake.walked, []string{firstRepo}) {
+			t.Errorf("result = %+v, err = %v, walked = %v", got, err, fake.walked)
+		}
+	})
+}
+
+func TestRunRepositoryList(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		err       error
+		name      string
+		result    reconcile.RunStatus
+		walks     int
+		truncated bool
+	}{
+		{io.ErrUnexpectedEOF, "failed list", reconcile.RunPartial, 0, false},
+		{ghclient.ErrTokenSource, "failed authentication", reconcile.RunAuthFailed, 0, false},
+		{nil, "truncated list", reconcile.RunPartial, 1, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var fake runFake
+
+			fake.repos = []string{firstRepo}
+			fake.walk = walkOf(time.Time{})
+			fake.listErr, fake.listTruncated = test.err, test.truncated
+
+			got, err := reconcile.Run(t.Context(), &fake, &fake, &fake, &fake, runClock(time.Now()))
+			if err != nil || got.Result != test.result || got.Repositories != test.walks || got.Pages != test.walks ||
+				len(fake.walked) != test.walks {
+				t.Errorf("result = %+v, err = %v, walked = %v", got, err, fake.walked)
 			}
 		})
 	}

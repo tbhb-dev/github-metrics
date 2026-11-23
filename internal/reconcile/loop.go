@@ -19,9 +19,11 @@ const (
 	incremental  = "incremental"
 	metricPrefix = "github_metrics.reconcile."
 	seconds      = "s"
+
+	maxConsecutivePassErrors = 3
 )
 
-// Pass runs one reconciliation. A store error stops the scheduler.
+// Pass runs one reconciliation and returns any store error.
 type Pass func(ctx context.Context) (RunResult, error)
 
 // LoopClock supplies pass times and a ticker with a stop function.
@@ -75,8 +77,8 @@ func NewLoop(pass Pass, meter metric.Meter, log *slog.Logger, clock LoopClock) (
 	return &loop, nil
 }
 
-// Start runs passes serially until cancellation or a store error. Call it once
-// from the goroutine that owns the loop.
+// Start runs passes serially until cancellation or three consecutive pass
+// errors. Call it once from the goroutine that owns the loop.
 func (l *Loop) Start(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
@@ -85,20 +87,38 @@ func (l *Loop) Start(ctx context.Context) error {
 	ticks, stop := l.clock.NewTicker(passInterval)
 	defer stop()
 
-	finished, err := l.runPass(ctx)
-	for err == nil && ctx.Err() == nil {
+	consecutiveErrors := 0
+
+	for {
+		finished, err := l.runPass(ctx)
+		if err != nil {
+			consecutiveErrors++
+		} else {
+			consecutiveErrors = 0
+		}
+
+		if consecutiveErrors == maxConsecutivePassErrors || ctx.Err() != nil {
+			return err
+		}
+
+		if !waitForNextPass(ctx, ticks, finished) {
+			return nil
+		}
+	}
+}
+
+func waitForNextPass(ctx context.Context, ticks <-chan time.Time, finished time.Time) bool {
+	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return false
 		case tick := <-ticks:
 			// The ticker may still hold a tick from the previous pass.
-			if tick.After(finished) && ctx.Err() == nil {
-				finished, err = l.runPass(ctx)
+			if tick.After(finished) {
+				return ctx.Err() == nil
 			}
 		}
 	}
-
-	return err
 }
 
 func (l *Loop) runPass(ctx context.Context) (time.Time, error) {
@@ -110,9 +130,11 @@ func (l *Loop) runPass(ctx context.Context) (time.Time, error) {
 
 	finished := l.clock.Now()
 	elapsed := finished.Sub(started)
+	level := slog.LevelInfo
 
 	if err != nil {
 		result.Result = RunPartial
+		level = slog.LevelError
 	}
 
 	kind := attribute.String("kind", incremental)
@@ -128,8 +150,8 @@ func (l *Loop) runPass(ctx context.Context) (time.Time, error) {
 		l.lastSuccess.Record(ctx, finished.Unix(), kindOnly)
 	}
 
-	l.log.InfoContext(
-		ctx, "reconcile pass finished",
+	l.log.LogAttrs(
+		ctx, level, "reconcile pass finished",
 		slog.String("kind", incremental), slog.String("result", string(result.Result)),
 		slog.Int("repos", result.Repositories), slog.Int("pages", result.Pages),
 		slog.Int("not_modified", result.NotModified), slog.Int("recorded", result.Recorded),

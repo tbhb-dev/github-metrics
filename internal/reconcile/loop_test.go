@@ -123,10 +123,14 @@ func TestLoopReportsPasses(t *testing.T) {
 
 		var logs bytes.Buffer
 
+		const firstFailure = 3
+
 		statuses := []reconcile.RunStatus{
 			reconcile.RunOK,
 			reconcile.RunPartial,
 			reconcile.RunAuthFailed,
+			reconcile.RunPartial,
+			reconcile.RunPartial,
 			reconcile.RunPartial,
 		}
 		firstSuccess := time.Now().Add(2 * time.Second)
@@ -141,7 +145,7 @@ func TestLoopReportsPasses(t *testing.T) {
 			}
 			calls++
 
-			if calls == len(statuses) {
+			if calls > firstFailure {
 				result.Result = ""
 
 				return result, fmt.Errorf("store error with request details: %w", io.ErrClosedPipe)
@@ -161,7 +165,43 @@ func TestLoopReportsPasses(t *testing.T) {
 		}
 
 		checkLoopMetrics(t, reader, firstSuccess)
-		checkLoopLogs(t, &logs, statuses)
+		checkLoopLogs(t, &logs, statuses, firstFailure)
+	})
+}
+
+func TestLoopResetsConsecutivePassErrors(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		passErrors := []error{
+			io.ErrClosedPipe, io.ErrClosedPipe, nil, io.ErrClosedPipe, io.ErrClosedPipe, io.ErrUnexpectedEOF,
+		}
+		calls := 0
+		pass := func(context.Context) (reconcile.RunResult, error) {
+			var result reconcile.RunResult
+
+			result.Result = reconcile.RunPartial
+			err := passErrors[calls]
+			calls++
+
+			return result, err
+		}
+
+		loop, err := reconcile.NewLoop(pass, noop.NewMeterProvider().Meter("test"), slog.New(slog.DiscardHandler), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = loop.Start(t.Context())
+		if !errors.Is(err, io.ErrUnexpectedEOF) || calls != len(passErrors) {
+			t.Fatalf(
+				"loop returned %v after %d passes, want %v after %d",
+				err,
+				calls,
+				io.ErrUnexpectedEOF,
+				len(passErrors),
+			)
+		}
 	})
 }
 
@@ -217,11 +257,11 @@ func checkLoopMetrics(t *testing.T, reader *sdkmetric.ManualReader, lastSuccess 
 
 	want := map[string]float64{
 		runs + ",result=ok":                                       1,
-		runs + ",result=partial":                                  2,
+		runs + ",result=partial":                                  4,
 		runs + ",result=auth_failed":                              1,
-		prefix + "duration/s/" + kind:                             8,
-		prefix + "duration/s/" + kind + "/count":                  4,
-		prefix + "repairs//counter/" + kind + ",milestone=merged": 8,
+		prefix + "duration/s/" + kind:                             12,
+		prefix + "duration/s/" + kind + "/count":                  6,
+		prefix + "repairs//counter/" + kind + ",milestone=merged": 12,
 		prefix + "last_success/s/gauge/" + kind:                   float64(lastSuccess.Unix()),
 	}
 	if !maps.Equal(got, want) {
@@ -229,12 +269,12 @@ func checkLoopMetrics(t *testing.T, reader *sdkmetric.ManualReader, lastSuccess 
 	}
 }
 
-func checkLoopLogs(t *testing.T, logs io.Reader, statuses []reconcile.RunStatus) {
+func checkLoopLogs(t *testing.T, logs io.Reader, statuses []reconcile.RunStatus, firstFailure int) {
 	t.Helper()
 
 	decoder := json.NewDecoder(logs)
 
-	for _, status := range statuses {
+	for index, status := range statuses {
 		var got map[string]any
 
 		err := decoder.Decode(&got)
@@ -244,8 +284,13 @@ func checkLoopLogs(t *testing.T, logs io.Reader, statuses []reconcile.RunStatus)
 
 		delete(got, slog.TimeKey)
 
+		level := slog.LevelInfo
+		if index >= firstFailure {
+			level = slog.LevelError
+		}
+
 		want := map[string]any{
-			slog.LevelKey: "INFO", slog.MessageKey: "reconcile pass finished",
+			slog.LevelKey: level.String(), slog.MessageKey: "reconcile pass finished",
 			"kind": "incremental", "result": string(status),
 			"repos": float64(3), "pages": float64(4), "not_modified": float64(1), "recorded": float64(2),
 			"already_counted": float64(5), "truncated": float64(1), "duration": float64(2 * time.Second),
