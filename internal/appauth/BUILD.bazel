@@ -18,12 +18,11 @@ go_test(
     srcs = [
         "appauth_test.go",
         "concurrent_test.go",
+        "export_test.go",
         "failure_test.go",
         "transport_test.go",
     ],
+    embed = [":appauth"],
     visibility = ["//:__pkg__"],
-    deps = [
-        ":appauth",
-        "//internal/ghclient",
-    ],
+    deps = ["//internal/ghclient"],
 )

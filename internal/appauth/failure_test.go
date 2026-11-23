@@ -95,6 +95,11 @@ func TestResponseFailures(t *testing.T) {
 			stageDecode,
 			http.StatusCreated,
 		},
+		"expiry beyond limit": {
+			`{"token":"response-marker","expires_at":"2026-01-01T02:00:00.000000001Z"}`,
+			stageDecode,
+			http.StatusCreated,
+		},
 		"large body": {strings.Repeat("response-marker", 1<<20), "read", http.StatusCreated},
 		"trailing data": {
 			`{"token":"response-marker","expires_at":"2026-01-01T01:00:00Z"}x`,
@@ -130,6 +135,52 @@ func TestResponseFailures(t *testing.T) {
 				t.Error("failure log exposed response text")
 			}
 		})
+	}
+}
+
+func TestExpiryBound(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+
+	var calls atomic.Int64
+
+	server := httptest.NewServer(http.HandlerFunc(func(resp http.ResponseWriter, _ *http.Request) {
+		lifetime := 2 * time.Hour
+		if calls.Add(1) == 2 {
+			lifetime += time.Nanosecond
+		}
+
+		resp.WriteHeader(http.StatusCreated)
+
+		_, _ = fmt.Fprintf(resp, `{"token":"response-marker","expires_at":%q}`,
+			now.Add(lifetime).Format(time.RFC3339Nano))
+	}))
+	t.Cleanup(server.Close)
+
+	var logs bytes.Buffer
+
+	cfg := config(t, server, func() time.Time { return now })
+	cfg.Logger = slog.New(slog.NewJSONHandler(&logs, nil))
+	source := newSource(t, cfg)
+
+	checkToken(t, source.Token, "response-marker")
+
+	token, err := source.Renew(t.Context())
+	if token != "" {
+		t.Error("Renew failure didn't discard the token")
+	}
+
+	checkAuthError(t, err)
+	checkLog(t, &logs, stageDecode, http.StatusCreated)
+	checkToken(t, source.Token, "response-marker")
+
+	if calls.Load() != 3 {
+		t.Error("Token reused the cache after an invalid expiry")
+	}
+
+	if strings.Contains(logs.String(), "response-marker") {
+		t.Error("failure log exposed response text")
 	}
 }
 

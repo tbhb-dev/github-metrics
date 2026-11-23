@@ -29,6 +29,8 @@ const (
 	renewBefore       = 5 * time.Minute
 	issuedBefore      = time.Minute
 	assertionLifetime = 9 * time.Minute
+	maxTokenLifetime  = 2 * time.Hour
+	defaultTimeout    = 30 * time.Second
 	maxBody           = 1 << 20
 )
 
@@ -36,7 +38,7 @@ const (
 var ErrAuth = errors.New("github app authentication failed")
 
 // Config identifies one installation. Nil HTTPClient, Now, and Logger fields
-// use the standard HTTP client, system clock, and default logger.
+// use a client with a 30 second timeout, the system clock, and the default logger.
 type Config struct {
 	HTTPClient     *http.Client
 	Now            func() time.Time
@@ -61,10 +63,13 @@ type Source struct {
 }
 
 // New parses the private key without sending a request. It accepts an RSA key
-// in PKCS1 or PKCS8 form and an absolute HTTP or HTTPS API base URL.
+// in PKCS1 or PKCS8 form and an absolute HTTPS API base URL. HTTP is allowed
+// for localhost, 127.0.0.1, and ::1.
 func New(cfg Config) (*Source, error) {
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = http.DefaultClient
+		cfg.HTTPClient = &http.Client{
+			Transport: nil, CheckRedirect: nil, Jar: nil, Timeout: defaultTimeout,
+		}
 	}
 
 	if cfg.Now == nil {
@@ -76,7 +81,7 @@ func New(cfg Config) (*Source, error) {
 	}
 
 	base, err := url.Parse(cfg.BaseURL)
-	if err != nil || base.Host == "" || (base.Scheme != "https" && base.Scheme != "http") ||
+	if err != nil || base.Host == "" || !allowsScheme(base) ||
 		base.User != nil || base.RawQuery != "" || base.ForceQuery || base.Fragment != "" ||
 		cfg.AppID <= 0 || cfg.InstallationID <= 0 {
 		cfg.Logger.Error("github app authentication failed", "stage", "config", "status", 0)
@@ -106,6 +111,20 @@ func New(cfg Config) (*Source, error) {
 		appID:   cfg.AppID,
 		mu:      sync.Mutex{},
 	}, nil
+}
+
+func allowsScheme(base *url.URL) bool {
+	switch base.Scheme {
+	case "https":
+		return true
+	case "http":
+		switch strings.ToLower(base.Hostname()) {
+		case "localhost", "127.0.0.1", "::1":
+			return true
+		}
+	}
+
+	return false
 }
 
 func parseKey(data []byte) (*rsa.PrivateKey, error) {
@@ -234,7 +253,9 @@ func (s *Source) fetch(ctx context.Context) (string, error) {
 		Token     string    `json:"token"`
 	}
 
-	if json.Unmarshal(body, &reply) != nil || reply.Token == "" || !reply.ExpiresAt.After(s.now()) {
+	now := s.now()
+	if json.Unmarshal(body, &reply) != nil || reply.Token == "" || !reply.ExpiresAt.After(now) ||
+		reply.ExpiresAt.After(now.Add(maxTokenLifetime)) {
 		return s.failure(ctx, "decode", res.StatusCode)
 	}
 
