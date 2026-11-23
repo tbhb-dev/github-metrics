@@ -8,22 +8,30 @@ repo_files()
 
 go_library(
     name = "reconcile",
-    srcs = ["list.go"],
+    srcs = [
+        "list.go",
+        "run.go",
+    ],
     importpath = "github.com/tbhb-dev/github-metrics/internal/reconcile",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/budget",
         "//internal/ghclient",
+        "//internal/recorder",
     ],
 )
 
 go_test(
     name = "reconcile_test",
-    srcs = ["list_test.go"],
+    srcs = [
+        "list_test.go",
+        "run_test.go",
+    ],
     visibility = ["//:__pkg__"],
     deps = [
         ":reconcile",
         "//internal/budget",
         "//internal/ghclient",
+        "//internal/recorder",
     ],
 )
