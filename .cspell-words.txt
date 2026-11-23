@@ -142,6 +142,7 @@ prek
 pretooluse
 pylock
 recvcheck
+resolv
 retryhttp
 retrypolicy
 rollouts

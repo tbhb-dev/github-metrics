@@ -22,6 +22,8 @@ const (
 	never         = "never"
 	envFile       = "--env-file"
 	forceRecreate = "--force-recreate"
+	resolverFile  = "resolv.conf"
+	resolverMount = "/etc/resolv.conf"
 )
 
 // result is what one run of up.sh left behind.
@@ -480,6 +482,10 @@ func TestReceiverServiceSettings(t *testing.T) {
 		"\n    secrets:\n      - webhook_secret\n      - github_app_key\n",
 		"\n      STORE_FILE: /var/lib/github-metrics/store.db\n",
 		"\n    volumes:\n      - store:/var/lib/github-metrics\n",
+		"\n      - type: bind\n        source: >-\n" +
+			"          ${RECEIVER_RESOLV_CONF:?set RECEIVER_RESOLV_CONF to a resolv.conf\n" +
+			"          file that lists the upstream resolvers}\n" +
+			"        target: " + resolverMount + "\n        read_only: true\n",
 		"\n    networks:\n      - edge\n      - metrics\n",
 	} {
 		if !strings.Contains(block, want) {
@@ -532,7 +538,7 @@ func TestTunnelServiceSettings(t *testing.T) {
 		t.Error("compose.yaml does not define the tunnel_token secret as ./secrets/tunnel_token")
 	}
 
-	for _, banned := range []string{"privileged", "cap_add"} {
+	for _, banned := range []string{"privileged", "cap_add", resolverMount} {
 		if strings.Contains(block, banned) {
 			t.Errorf("the tunnel service contains %q", banned)
 		}
@@ -542,6 +548,51 @@ func TestTunnelServiceSettings(t *testing.T) {
 		if strings.Contains(composeText(t), banned) {
 			t.Errorf("compose.yaml contains %q", banned)
 		}
+	}
+}
+
+func TestComposeRequiresReceiverResolverFile(t *testing.T) {
+	t.Parallel()
+
+	docker, err := exec.LookPath("docker")
+	if err != nil {
+		t.Skip("Docker is not installed")
+	}
+
+	version, versionErr := exec.CommandContext(t.Context(), docker, "compose", "version").CombinedOutput()
+	if versionErr != nil {
+		t.Skipf("Docker Compose is unavailable: %v: %s", versionErr, version)
+	}
+
+	dir := t.TempDir()
+	resolverPath := filepath.Join(dir, resolverFile)
+	writeFixture(t, filepath.Join(dir, "compose.yaml"), composeText(t), 0o600)
+	writeFixture(t, resolverPath, "", 0o600)
+
+	render := func(extraEnv ...string) ([]byte, error) {
+		cmd := exec.CommandContext(t.Context(), docker, "compose", "config", "--quiet")
+		cmd.Dir = dir
+
+		cmd.Env = append([]string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + os.Getenv("HOME"),
+			"GITHUB_METRICS_IMAGE=" + digest,
+			"METRICS_NETWORK=metrics",
+		}, extraEnv...)
+
+		return cmd.CombinedOutput()
+	}
+
+	out, renderErr := render("RECEIVER_RESOLV_CONF=" + resolverPath)
+	if renderErr != nil {
+		t.Fatalf("compose config with a resolver file: %v: %s", renderErr, out)
+	}
+
+	const message = "set RECEIVER_RESOLV_CONF to a resolv.conf file that lists the upstream resolvers"
+
+	out, renderErr = render()
+	if renderErr == nil || !strings.Contains(string(out), message) {
+		t.Fatalf("compose config without a resolver file: %v: %s, want %q", renderErr, out, message)
 	}
 }
 
@@ -602,7 +653,8 @@ func TestUpWithSudoAndDotEnv(t *testing.T) {
 
 	res := runConfigured(t, "/bin/sh", func(dir string) {
 		writeFixture(t, filepath.Join(dir, "use-sudo"), "", 0o600)
-		writeFixture(t, filepath.Join(dir, ".env"), "METRICS_NETWORK=metrics\n", 0o600)
+		writeFixture(t, filepath.Join(dir, ".env"),
+			"METRICS_NETWORK=metrics\nRECEIVER_RESOLV_CONF="+filepath.Join(dir, resolverFile)+"\n", 0o600)
 	}, digest)
 
 	want := []string{
