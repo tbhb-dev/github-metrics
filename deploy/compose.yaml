@@ -62,6 +62,16 @@ services:
       WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
     volumes:
       - store:/var/lib/github-metrics
+      # Docker's embedded DNS refuses requests under gVisor. The deploy
+      # supplies a file that lists the upstream resolvers.
+      - type: bind
+        source: >-
+          ${RECEIVER_RESOLV_CONF:?set RECEIVER_RESOLV_CONF to a resolv.conf
+          file that lists the upstream resolvers}
+        target: /etc/resolv.conf
+        read_only: true
+        bind:
+          create_host_path: false
     secrets:
       - webhook_secret
       - github_app_key
