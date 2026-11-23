@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"slices"
 	"time"
 
 	"github.com/tbhb-dev/github-metrics/internal/budget"
@@ -23,10 +22,6 @@ const (
 	DefaultMaxPages = 50
 	// SweepMaxPages caps the daily sweep of one repository.
 	SweepMaxPages = 200
-	// MaxRepoPages caps the repository list.
-	MaxRepoPages = 10
-
-	repositoriesPath = "installation/repositories?per_page=100"
 )
 
 // Getter is the part of ghclient.Client the lister uses.
@@ -38,12 +33,6 @@ type Getter interface {
 // clears one, because the client sends no tag for an empty one.
 type Tags interface {
 	Set(target, etag string)
-}
-
-// Repository is one repository of the installation.
-type Repository struct {
-	FullName string `json:"full_name"` //nolint:tagliatelle // GitHub field name.
-	ID       int64  `json:"id"`
 }
 
 // ClosedPR is the list item of a pull request that has a close time. It
@@ -87,7 +76,7 @@ type Walked struct {
 	Unchanged bool
 }
 
-// Lister reads the repository list and the updated-order walks. It isn't safe
+// Lister reads the updated-order walks. It isn't safe
 // for concurrent use.
 type Lister struct {
 	client Getter
@@ -95,10 +84,6 @@ type Lister struct {
 	base   *url.URL
 	// stops holds the stop time of each repository's last clean walk.
 	stops map[string]time.Time
-	// cached holds the last repository list, valid only when the last full
-	// read fit on one page and every page succeeded.
-	cached []Repository
-	valid  bool
 }
 
 // NewLister returns a lister. The base URL must be the one the client uses,
@@ -106,35 +91,7 @@ type Lister struct {
 // slash, such as /api/v3/, so the request paths stay under it. A page cap below
 // one reads one page.
 func NewLister(client Getter, tags Tags, base *url.URL) *Lister {
-	return &Lister{client: client, tags: tags, base: base, cached: nil, valid: false, stops: map[string]time.Time{}}
-}
-
-type repositoryPage struct {
-	Repositories []Repository `json:"repositories"`
-}
-
-// Repositories returns the installation's repositories. Only a list that fit
-// on one page keeps its first-page tag, since a tag on page one can't see a
-// change confined to page two. A 304 then returns the cached list. For a
-// longer list, or after a failed page, every page is read in full and the
-// tags are cleared. The bool is true when the page cap cut the list short.
-func (l *Lister) Repositories(ctx context.Context) ([]Repository, bool, error) {
-	if !l.valid {
-		l.clear(repositoriesPath)
-	}
-
-	repos, truncated, single, err := l.readRepositories(ctx)
-	l.valid = err == nil && single
-
-	if l.valid {
-		l.cached = slices.Clone(repos)
-
-		return repos, truncated, nil
-	}
-
-	l.clear(repositoriesPath)
-
-	return repos, truncated, err
+	return &Lister{client: client, tags: tags, base: base, stops: map[string]time.Time{}}
 }
 
 // Updated walks a repository's pull requests in `updated_at` order, newest
@@ -188,42 +145,6 @@ func (l *Lister) fetch(ctx context.Context, priority budget.Priority, target str
 	}
 
 	return resp, nil
-}
-
-// readRepositories returns the cached list after a 304 of the first page. The
-// second bool is true when the list fit on one page.
-func (l *Lister) readRepositories(ctx context.Context) ([]Repository, bool, bool, error) {
-	repos := []Repository{}
-	target := repositoriesPath
-
-	for page := 1; ; page++ {
-		resp, err := l.fetch(ctx, budget.Incremental, target, page)
-		if err != nil {
-			return nil, false, false, err
-		}
-
-		if resp.NotModified() && page == 1 && l.valid {
-			return slices.Clone(l.cached), false, true, nil
-		}
-
-		var decoded repositoryPage
-
-		err = json.Unmarshal(resp.Body, &decoded)
-		if err != nil {
-			return nil, false, false, fmt.Errorf("decode repositories: %w", err)
-		}
-
-		repos = append(repos, decoded.Repositories...)
-
-		switch {
-		case resp.Next == "":
-			return repos, false, page == 1, nil
-		case page >= MaxRepoPages:
-			return repos, true, false, nil
-		}
-
-		target = resp.Next
-	}
 }
 
 func (l *Lister) walk(ctx context.Context, repo, first string, opts WalkOptions) (Walked, error) {

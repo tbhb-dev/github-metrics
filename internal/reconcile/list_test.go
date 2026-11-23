@@ -27,10 +27,7 @@ type fakeTokens struct{}
 func (fakeTokens) Token(context.Context) (string, error) { return "test-token", nil }
 func (fakeTokens) Renew(context.Context) (string, error) { return "test-token", nil }
 
-const (
-	firstPage = "/repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=100"
-	repoPage  = "/installation/repositories?per_page=100"
-)
+const firstPage = "/repos/o/r/pulls?state=all&sort=updated&direction=desc&per_page=100"
 
 // rig is a lister on a real client, and what its fake server received.
 type rig struct {
@@ -220,67 +217,6 @@ func TestUpdatedFirstPageTagOnly(t *testing.T) {
 	}
 }
 
-func TestRepositoriesSinglePageUsesTag(t *testing.T) {
-	t.Parallel()
-
-	fake := newRig(t, func(resp http.ResponseWriter, req *http.Request, _ string) {
-		if req.Header.Get("If-None-Match") == `"list"` {
-			resp.WriteHeader(http.StatusNotModified)
-
-			return
-		}
-
-		resp.Header().Set("ETag", `"list"`)
-		write(t, resp, `{"repositories":[{"id":7,"full_name":"o/r"},{"id":8,"full_name":"o/s"}]}`)
-	})
-
-	for range 2 {
-		repos, truncated, err := fake.lister.Repositories(t.Context())
-		if err != nil || truncated || len(repos) != 2 || repos[0].FullName != "o/r" || repos[0].ID != 7 {
-			t.Fatalf("repos = %+v, truncated = %v, err = %v", repos, truncated, err)
-		}
-
-		// A caller editing its copy must not change the cached list.
-		repos[0] = repos[1]
-	}
-
-	if len(fake.requests) != 2 || fake.tags[repoPage] != `"list"` {
-		t.Errorf("requests = %v, last tag = %q", fake.requests, fake.tags[repoPage])
-	}
-}
-
-func TestRepositoriesTwoPagesSendNoTag(t *testing.T) {
-	t.Parallel()
-
-	fake := newRig(t, func(resp http.ResponseWriter, req *http.Request, host string) {
-		resp.Header().Set("ETag", `"`+req.URL.RequestURI()+`"`)
-
-		if req.URL.Query().Get("page") == "" {
-			resp.Header().Set("Link", "<"+host+repoPage+`&page=2>; rel="next"`)
-			write(t, resp, `{"repositories":[{"id":1,"full_name":"o/a"}]}`)
-
-			return
-		}
-
-		write(t, resp, `{"repositories":[{"id":2,"full_name":"o/b"}]}`)
-	})
-
-	for range 2 {
-		repos, truncated, err := fake.lister.Repositories(t.Context())
-		if err != nil || truncated || len(repos) != 2 {
-			t.Fatalf("repos = %+v, truncated = %v, err = %v", repos, truncated, err)
-		}
-	}
-
-	if len(fake.requests) != 4 {
-		t.Fatalf("requests = %v, want both pages twice", fake.requests)
-	}
-
-	if fake.tags[repoPage] != "" || fake.tags[repoPage+"&page=2"] != "" {
-		t.Errorf("tags = %v, want none", fake.tags)
-	}
-}
-
 func TestUpdatedWiderWindowReadsPastTag(t *testing.T) {
 	t.Parallel()
 
@@ -310,23 +246,12 @@ func TestUpdatedWiderWindowReadsPastTag(t *testing.T) {
 func TestListerKeepsBasePath(t *testing.T) {
 	t.Parallel()
 
-	fake := newRigAt(t, "/api/v3/", func(resp http.ResponseWriter, req *http.Request, _ string) {
-		if req.URL.Path == "/api/v3/installation/repositories" {
-			write(t, resp, `{"repositories":[{"id":1,"full_name":"o/r"}]}`)
-
-			return
-		}
-
+	fake := newRigAt(t, "/api/v3/", func(resp http.ResponseWriter, _ *http.Request, _ string) {
 		write(t, resp, "[]")
 	})
 
-	_, _, err := fake.lister.Repositories(t.Context())
-	if err == nil {
-		_, err = fake.lister.Updated(t.Context(), "o/r", opts(50))
-	}
-
-	if want := []string{"/api/v3/installation/repositories?per_page=100", "/api/v3/repos/o/r/pulls?" +
-		"state=all&sort=updated&direction=desc&per_page=100"}; err != nil || !slices.Equal(fake.requests, want) {
+	_, err := fake.lister.Updated(t.Context(), "o/r", opts(50))
+	if want := []string{"/api/v3" + firstPage}; err != nil || !slices.Equal(fake.requests, want) {
 		t.Errorf("requests = %v, err = %v", fake.requests, err)
 	}
 }
