@@ -111,7 +111,7 @@ func run(addr string, log *slog.Logger) error {
 
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 
-	consumer, err := newRecorder(endpoint, meter)
+	consumer, err := newRecorder(endpoint, meter, repo)
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
@@ -150,12 +150,12 @@ func run(addr string, log *slog.Logger) error {
 }
 
 //nolint:ireturn // The worker accepts either recorder through its interface.
-func newRecorder(endpoint string, meter metric.Meter) (worker.Recorder, error) {
+func newRecorder(endpoint string, meter metric.Meter, ledger recorder.Ledger) (worker.Recorder, error) {
 	if endpoint == "" {
 		return noopRecorder{}, nil
 	}
 
-	consumer, err := recorder.New(meter)
+	consumer, err := recorder.New(meter, ledger)
 	if err != nil {
 		return nil, fmt.Errorf("create recorder: %w", err)
 	}

@@ -7,6 +7,7 @@ package recorder
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -16,11 +17,54 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
+// maxAge is how old a milestone may be and still count, as appendix A step 5 says.
+const maxAge = 24 * time.Hour
+
+const actionClosed = "closed"
+
+// ErrNoLedger means New got no ledger to claim milestones in.
+var ErrNoLedger = errors.New("recorder needs a ledger")
+
+// Ledger holds what the eligibility rule reads and the one claim per milestone.
+// The store satisfies it.
+type Ledger interface {
+	// Created returns the time of the store's first open.
+	Created() time.Time
+	// ClaimMilestone returns true and keeps the key when it was absent.
+	ClaimMilestone(key string) (bool, error)
+}
+
+// Result says what RecordClosed did with one milestone.
+type Result string
+
+// The results of one milestone.
+const (
+	ResultTooOld         Result = "too_old"
+	ResultAlreadyCounted Result = "already_counted"
+	ResultRecorded       Result = "recorded"
+)
+
+// Outcome holds the result for each milestone of a closed PR. A milestone the
+// PR doesn't have, or has no valid time for, keeps an empty result.
+type Outcome struct{ Merged, Ended Result }
+
+// ClosedPR is a closed pull request from a webhook body or a REST list item.
+// The first end's time and state travel together, apart from the merge.
+type ClosedPR struct {
+	CreatedAt, MergedAt, EndedAt time.Time
+	Repository, NodeID, Body     string
+	// EndedState is "merged" or "closed" and picks the cycle time series.
+	EndedState string
+	Merged     bool
+}
+
 // Recorder counts events without recording webhook text in attributes.
 type Recorder struct {
 	events, merges, conclusions, dropped metric.Int64Counter
 	cycleTime                            metric.Float64Histogram
 	mainRed                              metric.Int64Gauge
+	ledger                               Ledger
+	now                                  func() time.Time
 }
 
 type checkRun struct {
@@ -33,17 +77,25 @@ type checkRun struct {
 
 type pullRequest struct {
 	Body      string `json:"body"`
+	NodeID    string `json:"node_id"`    //nolint:tagliatelle // GitHub uses this field name.
 	CreatedAt string `json:"created_at"` //nolint:tagliatelle // GitHub uses this field name.
 	MergedAt  string `json:"merged_at"`  //nolint:tagliatelle // GitHub uses this field name.
 	ClosedAt  string `json:"closed_at"`  //nolint:tagliatelle // GitHub uses this field name.
 	Merged    bool   `json:"merged"`
 }
 
-// New creates the instruments used to record deliveries.
+// New creates the instruments used to record deliveries. The ledger claims
+// each milestone before it counts.
 //
 //nolint:mnd // The histogram has fixed cycle time buckets in seconds.
-func New(meter metric.Meter) (*Recorder, error) {
+func New(meter metric.Meter, ledger Ledger) (*Recorder, error) {
+	if ledger == nil {
+		return nil, ErrNoLedger
+	}
+
 	var recorder Recorder
+
+	recorder.ledger, recorder.now = ledger, time.Now
 
 	for _, counter := range []struct {
 		target *metric.Int64Counter
@@ -62,7 +114,7 @@ func New(meter metric.Meter) (*Recorder, error) {
 		*counter.target = instrument
 	}
 
-	for _, reason := range []string{"empty_event", "bad_body"} {
+	for _, reason := range []string{"empty_event", "bad_body", "no_node_id"} {
 		recorder.dropped.Add(context.Background(), 0,
 			metric.WithAttributes(attribute.String("reason", reason)))
 	}
@@ -116,6 +168,20 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 		repository = "unknown"
 	}
 
+	// Claim before any Add, so a claim error leaves the retried entry uncounted.
+	if event == "pull_request" && (delivery.Action == actionClosed || delivery.Action == "reopened") {
+		if delivery.PullRequest.NodeID == "" {
+			r.dropped.Add(ctx, 1, metric.WithAttributes(attribute.String("reason", "no_node_id")))
+
+			return nil
+		}
+
+		err = r.recordPullRequest(ctx, repository, delivery.Action, delivery.PullRequest)
+		if err != nil {
+			return err
+		}
+	}
+
 	repo := attribute.String("repository", repository)
 	r.merges.Add(ctx, 0, metric.WithAttributes(repo))
 
@@ -124,16 +190,61 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 	r.events.Add(ctx, 0, eventAttrs)
 	r.events.Add(ctx, 1, eventAttrs)
 
-	if event == "pull_request" && delivery.Action == "closed" {
-		if delivery.PullRequest.Merged {
-			r.merges.Add(ctx, 1, metric.WithAttributes(repo))
-		}
-
-		r.recordCycleTime(ctx, repo, delivery.PullRequest)
-	}
-
 	if event == "check_run" {
 		r.recordCheckRun(ctx, repo, delivery.Action, delivery.Repository.DefaultBranch, delivery.CheckRun)
+	}
+
+	return nil
+}
+
+// RecordClosed counts the merge and the first end of a closed PR once each,
+// across deliveries. A claim error records nothing for that
+// milestone and returns the error, so the caller retries.
+func (r *Recorder) RecordClosed(ctx context.Context, closed ClosedPR) (Outcome, error) {
+	var (
+		out Outcome
+		err error
+	)
+
+	repo := attribute.String("repository", closed.Repository)
+
+	if closed.Merged && !closed.MergedAt.IsZero() {
+		out.Merged, err = r.milestone(closed, "merged", closed.MergedAt, func() {
+			r.merges.Add(ctx, 0, metric.WithAttributes(repo))
+			r.merges.Add(ctx, 1, metric.WithAttributes(repo))
+		})
+		if err != nil {
+			return out, err
+		}
+	}
+
+	if !closed.EndedAt.IsZero() && !closed.CreatedAt.IsZero() {
+		out.Ended, err = r.milestone(closed, "ended", closed.EndedAt, func() { r.recordCycleTime(ctx, repo, closed) })
+	}
+
+	return out, err
+}
+
+// recordPullRequest handles a closed or reopened delivery. A PR created before
+// the store existed may have had its first close counted by an earlier version
+// of the service, so its reopen claims the `ended` milestone without counting,
+// and a later merge adds no second cycle time. A PR created after the store
+// existed has its first close counted by this version, however the deliveries
+// are ordered, so its reopen claims nothing.
+func (r *Recorder) recordPullRequest(ctx context.Context, repository, action string, request pullRequest) error {
+	if action == actionClosed {
+		_, err := r.RecordClosed(ctx, closedFromWebhook(repository, request))
+
+		return err
+	}
+
+	if parseTime(request.CreatedAt).After(r.ledger.Created()) {
+		return nil
+	}
+
+	_, err := r.ledger.ClaimMilestone(request.NodeID + "\x00ended")
+	if err != nil {
+		return fmt.Errorf("claim ended milestone: %w", err)
 	}
 
 	return nil
@@ -174,38 +285,69 @@ func (r *Recorder) recordCheckRun(
 	r.mainRed.Record(ctx, red, metric.WithAttributes(repo))
 }
 
-func (r *Recorder) recordCycleTime(ctx context.Context, repo attribute.KeyValue, request pullRequest) {
-	endText, state := request.ClosedAt, "closed"
+func closedFromWebhook(repository string, request pullRequest) ClosedPR {
+	var closed ClosedPR
+
+	closed.Repository, closed.NodeID, closed.Body = repository, request.NodeID, request.Body
+	closed.CreatedAt, closed.MergedAt = parseTime(request.CreatedAt), parseTime(request.MergedAt)
+	closed.EndedAt, closed.EndedState, closed.Merged = parseTime(request.ClosedAt), actionClosed, request.Merged
+
 	if request.Merged {
-		endText, state = request.MergedAt, "merged"
+		closed.EndedState = "merged"
 	}
 
-	end, err := time.Parse(time.RFC3339, endText)
-	if err != nil {
-		return
-	}
-
-	start, source := cycleStart(request)
-	if start.IsZero() || end.Before(start) {
-		return
-	}
-
-	r.cycleTime.Record(ctx, end.Sub(start).Seconds(), metric.WithAttributes(repo,
-		attribute.String("state", state), attribute.String("start_source", source)))
+	return closed
 }
 
-func cycleStart(request pullRequest) (time.Time, string) {
-	start, err := time.Parse(time.RFC3339, request.CreatedAt)
+func parseTime(text string) time.Time {
+	parsed, err := time.Parse(time.RFC3339, text)
 	if err != nil {
-		return time.Time{}, ""
+		return time.Time{}
 	}
 
+	return parsed
+}
+
+// milestone applies the eligibility rule to one milestone time, claims it, and
+// calls record only after a true claim.
+func (r *Recorder) milestone(closed ClosedPR, name string, when time.Time, record func()) (Result, error) {
+	key := closed.NodeID + "\x00" + name
+	skip := r.now().Sub(when) >= maxAge || !when.After(r.ledger.Created())
+
+	claimed, err := r.ledger.ClaimMilestone(key)
+	if err != nil {
+		return "", fmt.Errorf("claim %s milestone: %w", name, err)
+	}
+
+	switch {
+	case skip:
+		return ResultTooOld, nil
+	case !claimed:
+		return ResultAlreadyCounted, nil
+	}
+
+	record()
+
+	return ResultRecorded, nil
+}
+
+func (r *Recorder) recordCycleTime(ctx context.Context, repo attribute.KeyValue, closed ClosedPR) {
+	start, source := cycleStart(closed.CreatedAt, closed.Body)
+	if start.IsZero() || closed.EndedAt.Before(start) {
+		return
+	}
+
+	r.cycleTime.Record(ctx, closed.EndedAt.Sub(start).Seconds(), metric.WithAttributes(repo,
+		attribute.String("state", closed.EndedState), attribute.String("start_source", source)))
+}
+
+func cycleStart(start time.Time, body string) (time.Time, string) {
 	// pr_created is interim: the owner's rule starts at the earliest commit time.
 	// That needs the REST commits call in a later change, so interim values read low.
 	source := "pr_created"
 	startedAt := regexp.MustCompile(`\bstarted_at[:=]\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)`)
 
-	for line := range strings.Lines(request.Body) {
+	for line := range strings.Lines(body) {
 		if !strings.HasPrefix(line, "Generated-by:") && !strings.HasPrefix(line, "Assisted-by:") {
 			continue
 		}

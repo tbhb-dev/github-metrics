@@ -19,10 +19,14 @@ go_library(
 
 go_test(
     name = "recorder_test",
-    srcs = ["recorder_test.go"],
+    srcs = [
+        "closed_test.go",
+        "export_test.go",
+        "recorder_test.go",
+    ],
+    embed = [":recorder"],
     visibility = ["//:__pkg__"],
     deps = [
-        ":recorder",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
     ],

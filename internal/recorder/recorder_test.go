@@ -79,18 +79,17 @@ func recordCycleFixture(t *testing.T, test cycleTimeTest) (*sdkmetric.ManualRead
 
 	consumer, reader := newRecorder(t)
 
-	closedAt, state := test.end, closedState
+	state := closedState
 	if test.merged {
-		// Use a different closed_at to prove merged PRs use merged_at.
-		closedAt, state = "2026-11-15T10:00:00Z", "merged"
+		state = mergedState
 	}
 
 	body, err := json.Marshal(map[string]any{
 		"repository": map[string]string{"full_name": repositoryName},
 		"action":     test.action,
 		"pull_request": map[string]any{
-			"merged": test.merged, "created_at": test.createdAt,
-			"merged_at": test.end, "closed_at": closedAt, "body": test.body,
+			"node_id": nodeID, "merged": test.merged, "created_at": test.createdAt,
+			"merged_at": test.end, "closed_at": test.end, "body": test.body,
 		},
 	})
 	if err != nil {
@@ -108,6 +107,12 @@ func recordCycleFixture(t *testing.T, test cycleTimeTest) (*sdkmetric.ManualRead
 func newRecorder(t *testing.T) (*recorder.Recorder, *sdkmetric.ManualReader) {
 	t.Helper()
 
+	return newRecorderWith(t, newLedger(nil))
+}
+
+func newRecorderWith(t *testing.T, ledger recorder.Ledger) (*recorder.Recorder, *sdkmetric.ManualReader) {
+	t.Helper()
+
 	reader := sdkmetric.NewManualReader()
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 
@@ -118,10 +123,12 @@ func newRecorder(t *testing.T) (*recorder.Recorder, *sdkmetric.ManualReader) {
 		}
 	})
 
-	consumer, err := recorder.New(provider.Meter("test"))
+	consumer, err := recorder.New(provider.Meter("test"), ledger)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	consumer.SetClock(clockNow)
 
 	return consumer, reader
 }
@@ -217,6 +224,7 @@ func checkCycleHistogram(t *testing.T, measurement metricdata.Metrics, state, so
 }
 
 const (
+	reasonKey         = "reason"
 	droppedName       = "github.events.dropped"
 	closedState       = "closed"
 	startedAtSource   = "started_at"
@@ -245,14 +253,19 @@ func TestRecord(t *testing.T) {
 			},
 			"merge", pullRequestEvent,
 			`{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"closed",` +
-				`"pull_request":{"merged":true,"title":"omit title","body":"omit body",` +
+				`"pull_request":{"node_id":"PR_1","merged":true,"merged_at":"2026-11-15T13:00:00Z",` +
+				`"title":"omit title","body":"omit body",` +
 				`"head":{"ref":"omit branch"},"user":{"login":"omit login"}},"comment":{"body":"omit text"}}`,
 		},
 		{
 			map[string]map[string]string{
 				eventsName: {repositoryKey: unknownRepository, eventKey: pullRequestEvent, actionKey: closedState},
 			},
-			"closed without merge", pullRequestEvent, `{"action":"closed","pull_request":{"merged":false}}`,
+			"closed without merge", pullRequestEvent, `{"action":"closed","pull_request":{"node_id":"PR_1","merged":false}}`,
+		},
+		{
+			map[string]map[string]string{droppedName: {reasonKey: "no_node_id"}},
+			"closed without node ID", pullRequestEvent, `{"action":"closed","pull_request":{"merged":true}}`,
 		},
 		{
 			map[string]map[string]string{
@@ -275,11 +288,11 @@ func TestRecord(t *testing.T) {
 			"other event with empty action", "ping", `{}`,
 		},
 		{
-			map[string]map[string]string{droppedName: {"reason": "empty_event"}},
+			map[string]map[string]string{droppedName: {reasonKey: "empty_event"}},
 			"legacy entry", "", `{}`,
 		},
 		{
-			map[string]map[string]string{droppedName: {"reason": "bad_body"}},
+			map[string]map[string]string{droppedName: {reasonKey: "bad_body"}},
 			"bad JSON", pullRequestEvent, `{"action":`,
 		},
 	} {
@@ -353,7 +366,7 @@ func TestSeriesStartAtZero(t *testing.T) {
 	consumer, reader := newRecorder(t)
 
 	if got := collectCounters(t, reader); !reflect.DeepEqual(got, map[string]map[string]int64{
-		droppedName: {"reason=bad_body": 0, "reason=empty_event": 0},
+		droppedName: {"reason=bad_body": 0, "reason=empty_event": 0, "reason=no_node_id": 0},
 	}) {
 		t.Fatalf("startup counters = %v", got)
 	}
@@ -382,7 +395,9 @@ func TestSeriesStartAtZero(t *testing.T) {
 	for _, step := range []struct{ event, body string }{
 		{
 			pullRequestEvent,
-			`{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"closed","pull_request":{"merged":true}}`,
+			`{"repository":{"full_name":"tbhb-dev/github-metrics"},"action":"closed",` +
+				`"pull_request":{"node_id":"PR_1","merged":true,"created_at":"2026-11-15T12:00:00Z",` +
+				`"merged_at":"2026-11-15T13:00:00Z","closed_at":"2026-11-15T13:00:00Z"}}`,
 		},
 		{
 			checkRunEvent,
