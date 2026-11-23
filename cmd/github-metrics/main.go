@@ -99,6 +99,11 @@ func run(addr string, log *slog.Logger) error {
 		return fmt.Errorf("open store: %w", err)
 	}
 
+	err = logRepairFloor(log, repo)
+	if err != nil {
+		return errors.Join(err, repo.Close())
+	}
+
 	srv := receiver.NewServer(addr, receiver.Handler(secret, repo, log))
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -147,6 +152,17 @@ func run(addr string, log *slog.Logger) error {
 	defer cancel()
 
 	return errors.Join(err, srv.Shutdown(shutdownCtx), <-workerErr, shutdownTelemetry(shutdownCtx), repo.Close())
+}
+
+func logRepairFloor(log *slog.Logger, ledger recorder.Ledger) error {
+	floor, err := ledger.RepairFloor()
+	if err != nil {
+		return fmt.Errorf("read repair floor: %w", err)
+	}
+
+	log.Info("repair floor", slog.Time("repair_floor", floor))
+
+	return nil
 }
 
 //nolint:ireturn // The worker accepts either recorder through its interface.

@@ -5,6 +5,7 @@ package recorder_test
 
 import (
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -20,7 +21,10 @@ const (
 	mergedState = "merged"
 )
 
-var errClaim = errors.New("claim failed")
+var (
+	errClaim = errors.New("claim failed")
+	errFloor = errors.New("floor read failed")
+)
 
 func storeCreated() time.Time { return time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC) }
 
@@ -28,6 +32,8 @@ func clockNow() time.Time { return time.Date(2026, 11, 15, 14, 0, 0, 0, time.UTC
 
 type fakeLedger struct {
 	created  time.Time
+	floor    time.Time
+	floorErr error
 	claimErr error
 	onClaim  func()
 	claimed  map[string]bool
@@ -38,6 +44,7 @@ func newLedger(adjust func(*fakeLedger)) *fakeLedger {
 	var ledger fakeLedger
 
 	ledger.created, ledger.claimed = storeCreated(), map[string]bool{}
+	ledger.floor = clockNow().Add(-3 * time.Hour)
 
 	if adjust != nil {
 		adjust(&ledger)
@@ -47,6 +54,8 @@ func newLedger(adjust func(*fakeLedger)) *fakeLedger {
 }
 
 func (f *fakeLedger) Created() time.Time { return f.created }
+
+func (f *fakeLedger) RepairFloor() (time.Time, error) { return f.floor, f.floorErr }
 
 func (f *fakeLedger) ClaimMilestone(key string) (bool, error) {
 	if f.onClaim != nil {
@@ -147,9 +156,11 @@ func TestRecordClosed(t *testing.T) {
 		{"too old by age", func(closed *recorder.ClosedPR) {
 			old := clockNow().Add(-25 * time.Hour)
 			closed.CreatedAt, closed.MergedAt, closed.EndedAt = old.Add(-time.Hour), old, old
-		}, nil, tooOld, 0, 0},
-		{"too old by creation time", nil, func(l *fakeLedger) {
+			closed.Repair = true
+		}, func(l *fakeLedger) { l.floorErr = errFloor }, tooOld, 0, 0},
+		{"too old by creation time", func(closed *recorder.ClosedPR) { closed.Repair = true }, func(l *fakeLedger) {
 			l.created = clockNow().Add(-30 * time.Minute)
+			l.floorErr = errFloor
 		}, tooOld, 0, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -171,6 +182,79 @@ func TestRecordClosed(t *testing.T) {
 					got, len(ledger.claims), merges, len(cycles), test.want, test.wantMerges, test.wantCycles)
 			}
 		})
+	}
+}
+
+func TestRecordRepairFloor(t *testing.T) {
+	t.Parallel()
+
+	preFloor := recorder.Outcome{Merged: recorder.ResultPreFloor, Ended: recorder.ResultPreFloor}
+	recorded := recorder.Outcome{Merged: recorder.ResultRecorded, Ended: recorder.ResultRecorded}
+	preFloorEnd := recorder.Outcome{Merged: recorder.ResultRecorded, Ended: recorder.ResultPreFloor}
+
+	for _, test := range []struct {
+		name                   string
+		want                   recorder.Outcome
+		mergeOffset, endOffset time.Duration
+		wantMerges             int64
+		wantCycles             int
+	}{
+		{"at the floor", preFloor, 0, 0, 0, 0},
+		{"before the floor", preFloor, -time.Minute, -time.Minute, 0, 0},
+		{"after the floor", recorded, time.Minute, time.Minute, 1, 1},
+		{"first close before the floor", preFloorEnd, time.Minute, -time.Minute, 1, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			ledger := newLedger(nil)
+			consumer, reader := newRecorderWith(t, ledger)
+
+			closed := closedPR(func(pr *recorder.ClosedPR) {
+				pr.Repair = true
+				pr.CreatedAt = ledger.floor.Add(-time.Hour)
+				pr.MergedAt = ledger.floor.Add(test.mergeOffset)
+				pr.EndedAt = ledger.floor.Add(test.endOffset)
+			})
+
+			got, err := consumer.RecordClosed(t.Context(), closed)
+			if err != nil || got != test.want {
+				t.Fatalf("RecordClosed = %v, %v; want %v, nil", got, err, test.want)
+			}
+
+			merges, cycles := observations(t, reader)
+			if merges != test.wantMerges || len(cycles) != test.wantCycles {
+				t.Fatalf("merges %d, cycle states %v; want %d merges and %d cycle times",
+					merges, cycles, test.wantMerges, test.wantCycles)
+			}
+
+			if !ledger.claimed[nodeID+"\x00ended"] || ledger.claimed[nodeID+"\x00merged"] != (test.wantMerges == 1) {
+				t.Fatalf("claims %q, want ended and a claim for each recorded merge", ledger.claims)
+			}
+		})
+	}
+}
+
+func TestRepairFloorReadError(t *testing.T) {
+	t.Parallel()
+
+	ledger := newLedger(func(l *fakeLedger) { l.floorErr = errFloor })
+	consumer, reader := newRecorderWith(t, ledger)
+
+	_, err := consumer.RecordClosed(t.Context(), closedPR(func(pr *recorder.ClosedPR) { pr.Repair = true }))
+	if !errors.Is(err, errFloor) {
+		t.Fatalf("RecordClosed error = %v, want %v", err, errFloor)
+	}
+
+	body := []byte(`{"action":"reopened","pull_request":{"node_id":"PR_1","created_at":"2026-11-15T12:00:00Z"}}`)
+
+	err = consumer.Record(t.Context(), pullRequestEvent, body)
+	if !errors.Is(err, errFloor) {
+		t.Fatalf("Record error = %v, want %v", err, errFloor)
+	}
+
+	if counters := collectCounters(t, reader); len(ledger.claims) != 0 || len(counters["github.events"]) != 0 {
+		t.Fatalf("floor read errors produced claims %q or counted events %v", ledger.claims, counters["github.events"])
 	}
 }
 
@@ -228,18 +312,20 @@ func TestRecordReopened(t *testing.T) {
 	reopen := [2]string{"reopened", ""}
 	firstClose := [2]string{closedState, first}
 	mergeClose := [2]string{closedState, merge}
+	firstEnd := []string{closedState}
 
 	for _, test := range []struct {
 		name       string
 		created    string
 		steps      [][2]string // action and the rest of the pull_request body
-		wantCycles int
+		wantCycles []string
 	}{
 		// An earlier version may have counted this first close, so the reopen blocks a second count.
-		{"created before the store", "2026-10-20T12:00:00Z", [][2]string{reopen, mergeClose}, 0},
+		{"created before the floor", "2026-11-15T10:30:00Z", [][2]string{reopen, mergeClose}, nil},
+		{"created at the floor", "2026-11-15T11:00:00Z", [][2]string{reopen, mergeClose}, nil},
 		// This version counts the first close in any delivery order.
-		{"reopen before the first close", fresh, [][2]string{reopen, firstClose, mergeClose}, 1},
-		{"first close before the reopen", fresh, [][2]string{firstClose, reopen, mergeClose}, 1},
+		{"reopen before the first close", fresh, [][2]string{reopen, firstClose, mergeClose}, firstEnd},
+		{"first close before the reopen", fresh, [][2]string{firstClose, reopen, mergeClose}, firstEnd},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -257,8 +343,13 @@ func TestRecordReopened(t *testing.T) {
 			}
 
 			merges, cycles := observations(t, reader)
-			if merges != 1 || len(cycles) != test.wantCycles {
-				t.Fatalf("merges %d, cycle states %v; want 1 merge and %d cycle times", merges, cycles, test.wantCycles)
+			if merges != 1 || !slices.Equal(cycles, test.wantCycles) {
+				t.Fatalf(
+					"merges %d, cycle states %v; want 1 merge and cycle states %v",
+					merges,
+					cycles,
+					test.wantCycles,
+				)
 			}
 		})
 	}
@@ -267,7 +358,7 @@ func TestRecordReopened(t *testing.T) {
 func TestRecordClaimsBeforeAnyAdd(t *testing.T) {
 	t.Parallel()
 
-	ledger := newLedger(nil)
+	ledger := newLedger(func(l *fakeLedger) { l.floor = clockNow().Add(-30 * time.Minute) })
 	consumer, reader := newRecorderWith(t, ledger)
 
 	first := true
@@ -292,6 +383,11 @@ func TestRecordClaimsBeforeAnyAdd(t *testing.T) {
 	err := consumer.Record(t.Context(), pullRequestEvent, []byte(body))
 	if err != nil || len(ledger.claims) != 2 {
 		t.Fatalf("Record error %v, claims %v; want two claims", err, ledger.claims)
+	}
+
+	merges, cycles := observations(t, reader)
+	if merges != 1 || len(cycles) != 1 || cycles[0] != mergedState {
+		t.Fatalf("webhook before the floor recorded %d merges and cycle states %v; want 1 and [merged]", merges, cycles)
 	}
 
 	ledger.claimErr = errClaim

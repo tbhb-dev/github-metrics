@@ -4,7 +4,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -15,10 +18,54 @@ import (
 	"github.com/tbhb-dev/github-metrics/internal/recorder"
 )
 
-type stubLedger struct{}
+var errFloorRead = errors.New("floor read failed")
+
+type stubLedger struct {
+	floor    time.Time
+	floorErr error
+}
 
 func (stubLedger) Created() time.Time                  { return time.Time{} }
+func (s stubLedger) RepairFloor() (time.Time, error)   { return s.floor, s.floorErr }
 func (stubLedger) ClaimMilestone(string) (bool, error) { return true, nil }
+
+func TestLogRepairFloor(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+	floor := time.Date(2026, 11, 15, 13, 0, 0, 0, time.UTC)
+
+	err := logRepairFloor(log, stubLedger{floor: floor, floorErr: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var entry map[string]string
+
+	err = json.Unmarshal(logs.Bytes(), &entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if entry["level"] != "INFO" || entry["repair_floor"] != floor.Format(time.RFC3339) || len(entry) != 4 {
+		t.Fatalf("log entry = %v, want one info line with only the floor as an attribute", entry)
+	}
+}
+
+func TestLogRepairFloorReadError(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+
+	log := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	err := logRepairFloor(log, stubLedger{floor: time.Time{}, floorErr: errFloorRead})
+	if !errors.Is(err, errFloorRead) || logs.Len() != 0 {
+		t.Fatalf("logRepairFloor error = %v, log = %q; want %v and no log", err, logs.String(), errFloorRead)
+	}
+}
 
 func TestNewRecorderWithoutLedger(t *testing.T) {
 	t.Parallel()
@@ -60,7 +107,9 @@ func TestNewRecorderWithEndpoint(t *testing.T) {
 		}
 	})
 
-	consumer, err := newRecorder("configured", provider.Meter("test"), stubLedger{})
+	var ledger stubLedger
+
+	consumer, err := newRecorder("configured", provider.Meter("test"), ledger)
 	if err != nil {
 		t.Fatal(err)
 	}
