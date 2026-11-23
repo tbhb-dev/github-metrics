@@ -76,6 +76,10 @@ func TestInvalidConfig(t *testing.T) {
 		"empty base":            func(cfg *appauth.Config) { cfg.BaseURL = "" },
 		"invalid base":          func(cfg *appauth.Config) { cfg.BaseURL += "%" },
 		"relative base":         func(cfg *appauth.Config) { cfg.BaseURL = "/api/v3" },
+		"insecure base":         func(cfg *appauth.Config) { cfg.BaseURL = "http://example.invalid/api/v3" },
+		"localhost suffix":      func(cfg *appauth.Config) { cfg.BaseURL = "http://localhost.example.invalid" },
+		"loopback suffix":       func(cfg *appauth.Config) { cfg.BaseURL = "http://127.0.0.1.example.invalid" },
+		"other scheme":          func(cfg *appauth.Config) { cfg.BaseURL = "ftp://localhost" },
 		"query":                 func(cfg *appauth.Config) { cfg.BaseURL += "?credential-marker" },
 		"empty query":           func(cfg *appauth.Config) { cfg.BaseURL += "?" },
 		"fragment":              func(cfg *appauth.Config) { cfg.BaseURL += "#credential-marker" },
@@ -101,6 +105,70 @@ func TestInvalidConfig(t *testing.T) {
 
 			checkAuthError(t, err)
 			checkLog(t, &logs, "config", 0)
+		})
+	}
+}
+
+func TestAllowedBaseURLs(t *testing.T) {
+	t.Parallel()
+
+	server := rejectingAPI(t)
+	cfg := config(t, server, time.Now)
+
+	for _, base := range []string{
+		"https://example.invalid/api/v3",
+		"http://127.0.0.1:8080/api/v3",
+		"http://[::1]:8080/api/v3",
+		"http://localhost:8080/api/v3",
+		"http://LOCALHOST/api/v3",
+	} {
+		t.Run(base, func(t *testing.T) {
+			t.Parallel()
+
+			own := cfg
+			own.BaseURL = base
+
+			newSource(t, own)
+		})
+	}
+}
+
+func TestClientTimeout(t *testing.T) {
+	t.Parallel()
+
+	server := rejectingAPI(t)
+	cfg := config(t, server, time.Now)
+	tests := map[string]struct {
+		timeout  time.Duration
+		supplied bool
+	}{
+		"default":             {30 * time.Second, false},
+		"supplied timeout":    {7 * time.Second, true},
+		"supplied no timeout": {0, true},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			own := cfg
+			own.HTTPClient = nil
+
+			if test.supplied {
+				client := *cfg.HTTPClient
+				client.Timeout = test.timeout
+				own.HTTPClient = &client
+			}
+
+			client := newSource(t, own).HTTPClient()
+			if client.Timeout != test.timeout {
+				t.Error("client timeout didn't match the expected value")
+			}
+
+			if own.HTTPClient != nil && (client == own.HTTPClient || client.Transport != own.HTTPClient.Transport ||
+				own.HTTPClient.Timeout != test.timeout || own.HTTPClient.CheckRedirect != nil) {
+				t.Error("supplied client settings weren't preserved")
+			}
 		})
 	}
 }

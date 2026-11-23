@@ -171,7 +171,7 @@ func TestTokenLifecycle(t *testing.T) {
 				resp.WriteHeader(http.StatusCreated)
 
 				_, _ = fmt.Fprintf(resp, `{"token":"installation-%d","expires_at":%q}`,
-					count, start.Add(time.Duration(count)*time.Hour).Format(time.RFC3339))
+					count, now.Add(time.Hour).Format(time.RFC3339))
 			}))
 			t.Cleanup(server.Close)
 
