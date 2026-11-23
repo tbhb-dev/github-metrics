@@ -23,8 +23,10 @@ The helper doesn't use the network or write container logs. It never prints the 
 
 A failed check or copy stops deployment before Compose can start the services. Each launch recreates the containers to replace the receiver's old file mount after key rotation. Keep the runtime copy for container restarts and remove it through Docker when retiring the deployment. Use a local Docker daemon without user namespace remapping to preserve numeric host ownership.
 
-For an account with only `sudo docker` access, run `DEPLOY_DOCKER_SUDO=1 deploy/up.sh` with the image argument. It doesn't need sudo for file tools. Put `METRICS_NETWORK` and optional Compose settings in `.env` beside `compose.yaml` when sudo filters the environment. The script supplies the image reference through a temporary Compose environment file and removes it on exit. That file contains only the image reference, never the key.
+For an account with only `sudo docker` access, run `DEPLOY_DOCKER_SUDO=1 deploy/up.sh` with the image argument. It doesn't need sudo for file tools. Put `METRICS_NETWORK` and optional Compose settings in `.env` beside `compose.yaml` when sudo filters the environment. The script supplies the image reference and resolver path through a temporary Compose environment file and removes it on exit.
 
-Set `RECEIVER_RESOLV_CONF` to the path of a host file that lists the upstream resolvers, and put the variable in `.env` when sudo filters the environment.
+`RECEIVER_RESOLV_CONF` is required. Set it to the path of an existing, non-empty regular file on the deployment host that lists the upstream resolvers. Export the variable or set it to a literal path in `.env` beside `compose.yaml`. Relative paths start from that directory. `deploy/up.sh` checks the file before it calls Docker.
+
+Mounting this file in the receiver replaces Docker's embedded DNS for that container. Set the receiver's collector endpoint to an IP address so the receiver can reach the collector.
 
 With `GITHUB_METRICS_IMAGE` and `METRICS_NETWORK` also set, run `docker compose -f deploy/compose.yaml config` to review the mount and environment settings without reading the key. Check that only the receiver mounts `github_app_key`, that its source ends in `secrets/runtime/github_app_key`, and that `GITHUB_APP_KEY_FILE` names `/run/secrets/github_app_key`. This command checks configuration, not file access. Run the helper on the deployment host before starting the containers.

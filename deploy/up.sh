@@ -14,8 +14,8 @@
 # re-keys an image on `docker load`, so the digest reference no longer
 # resolves and the image runs by its id.
 #
-# The host needs grep, dirname, mktemp and rm besides the shell and docker. A pinned
-# BusyBox container prepares the key through the same Docker access as Compose.
+# The host needs awk, grep, dirname, mktemp and rm besides the shell and docker.
+# A pinned BusyBox container prepares the key through the same Docker access as Compose.
 #
 # Nothing but `--pull never` may follow the image, so a caller can't change
 # the Compose file, the project or the environment through arguments after the
@@ -61,6 +61,7 @@ case $# in
 esac
 
 deploy_dir=$(CDPATH='' cd "$(dirname "$0")" && pwd)
+dot_env=$deploy_dir/.env
 
 docker_cmd() {
   if [ "${DEPLOY_DOCKER_SUDO:-0}" = 1 ]; then
@@ -72,6 +73,59 @@ docker_cmd() {
 
 if [ ! -f "$deploy_dir/secrets/github_app_key" ] || [ -L "$deploy_dir/secrets/github_app_key" ]; then
   echo "up.sh: secrets/github_app_key must exist as a regular file, not a symlink" >&2
+  exit 2
+fi
+
+# An exported value takes precedence over .env, as it does in Compose.
+# Read a literal assignment without running .env as a shell script.
+# cspell:ignore gsub
+resolver=${RECEIVER_RESOLV_CONF-}
+if [ "${RECEIVER_RESOLV_CONF+x}" != x ] && [ -f "$dot_env" ]; then
+  resolver=$(awk '
+    function closing_quote(line, quote, start,   i, char) {
+      for (i = start; i <= length(line); i++) {
+        char = substr(line, i, 1)
+        if (char == "\\") i++
+        else if (char == quote) return i
+      }
+      return 0
+    }
+    multiline {
+      if (closing_quote($0, multiline, 1)) multiline = ""
+      next
+    }
+    /^[[:blank:]]*(export[[:blank:]]+)?[^#=:[:space:]]+[[:blank:]]*[=:]/ {
+      key = $0
+      sub(/^[[:blank:]]*(export[[:blank:]]+)?/, "", key)
+      sub(/[[:blank:]]*[=:].*$/, "", key)
+      sub(/^[^=:]*[=:][[:blank:]]*/, "")
+      quote = substr($0, 1, 1)
+      if (quote == "\047" || quote == "\"") {
+        end = closing_quote($0, quote, 2)
+        if (!end) multiline = quote
+        rest = substr($0, end + 1)
+        value = end && rest ~ /^[[:space:]]*(#.*)?$/ ? substr($0, 2, end - 2) : ""
+      } else {
+        sub(/ #.*/, "")
+        sub(/[[:space:]]+$/, "")
+        value = $0
+      }
+      if (key != "RECEIVER_RESOLV_CONF") next
+      if (quote == "\047") gsub(/\\\047/, "\047", value)
+      else if (value ~ /\$/ || (quote == "\"" && value ~ /\\/)) value = ""
+      resolver = value
+    }
+    END { print resolver }
+  ' "$dot_env" 2>/dev/null) || resolver=
+fi
+
+# Compose resolves relative bind sources from the directory of compose.yaml.
+case $resolver in
+'' | /*) ;;
+*) resolver=$deploy_dir/$resolver ;;
+esac
+if [ ! -f "$resolver" ] || [ ! -s "$resolver" ]; then
+  echo "up.sh: RECEIVER_RESOLV_CONF must name a non-empty regular file" >&2
   exit 2
 fi
 
@@ -107,15 +161,24 @@ docker_cmd run --rm --network none --read-only --log-driver none \
     mv -fT "$key_tmp" /secrets/runtime/github_app_key
   '
 
-# This temporary env file carries only the checked image reference. It also
-# works when sudo strips GITHUB_METRICS_IMAGE from the environment. Compose
-# reads env files more than once, so a pipe through /dev/stdin won't work.
+# The final env file carries the checked inputs even when sudo strips them
+# from the environment. Escape the path for a double-quoted Compose value.
+resolver_env=$(printf '%s\n' "$resolver" | awk '
+  NR > 1 { printf "\\n" }
+  {
+    for (i = 1; i <= length($0); i++) {
+      char = substr($0, i, 1)
+      if (char == "\\" || char == "\"" || char == "$") printf "\\"
+      printf "%s", char
+    }
+  }
+')
 image_env=$(mktemp "$deploy_dir/secrets/.image.XXXXXX")
 trap 'rm -f "$image_env"' 0
 trap 'exit 1' 1 2 15
-printf 'GITHUB_METRICS_IMAGE=%s\n' "$image" >"$image_env"
+printf 'GITHUB_METRICS_IMAGE=%s\nRECEIVER_RESOLV_CONF="%s"\n' "$image" "$resolver_env" >"$image_env"
 set -- --env-file "$image_env" -f "$deploy_dir/compose.yaml" up -d --force-recreate "$@"
-if [ -f "$deploy_dir/.env" ]; then
-  set -- --env-file "$deploy_dir/.env" "$@"
+if [ -f "$dot_env" ]; then
+  set -- --env-file "$dot_env" "$@"
 fi
-GITHUB_METRICS_IMAGE=$image docker_cmd compose "$@"
+GITHUB_METRICS_IMAGE=$image RECEIVER_RESOLV_CONF=$resolver docker_cmd compose "$@"
