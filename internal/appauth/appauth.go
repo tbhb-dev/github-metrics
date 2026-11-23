@@ -245,13 +245,16 @@ func (s *Source) fetch(ctx context.Context) (string, error) {
 		return s.failure(ctx, "sign", 0)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, nil)
+	const requestBody = `{"permissions":{"metadata":"read","pull_requests":"read"}}`
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.endpoint, strings.NewReader(requestBody))
 	if err != nil {
 		return s.failure(ctx, "request", 0)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+assertion)
 	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 
 	res, err := s.http.Do(req)
