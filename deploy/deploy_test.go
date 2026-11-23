@@ -26,6 +26,9 @@ const (
 	forceRecreate = "--force-recreate"
 	resolverFile  = "resolv.conf"
 	resolverMount = "/etc/resolv.conf"
+	resolverVar   = "RECEIVER_RESOLV_CONF"
+	dotEnv        = ".env"
+	directory     = "directory"
 )
 
 // result is what one run of up.sh left behind.
@@ -107,23 +110,35 @@ func prepareUpFixture(t *testing.T) string {
 	dir := makeSecrets(t)
 	writeFixture(t, filepath.Join(dir, "up.sh"), readFixture(t, "up.sh"), 0o600)
 	writeFixture(t, filepath.Join(dir, "secrets/github_app_key"), "test key contents\n", 0o600)
+	writeFixture(t, filepath.Join(dir, resolverFile), "# test resolver\n", 0o600)
+	writeFixture(t, filepath.Join(dir, dotEnv), resolverVar+"="+resolverFile+"\n", 0o600)
 
 	stub := `#!/bin/sh
+cd "${0%/*}" || exit 1
 if [ "$1" = run ]; then
 	printf '%s\0' "$@" > helper-record
 	if [ -f helper-exit ]; then read -r code < helper-exit; exit "$code"; fi
 	exit 0
 fi
 for arg do
-	case "$arg" in */secrets/.image.*) IFS= read -r image_line < "$arg" ;; esac
+	case "$arg" in
+		*/secrets/.image.*)
+			{ IFS= read -r image_line; IFS= read -r resolver_line; } < "$arg"
+			;;
+	esac
 done
-printf '%s\0' "${GITHUB_METRICS_IMAGE:-}" "$image_line" "$@" > record
+printf '%s\0' "${GITHUB_METRICS_IMAGE:-}" "$image_line" "${RECEIVER_RESOLV_CONF:-}" "$resolver_line" "$@" > record
 `
 	writeFixture(t, filepath.Join(dir, "docker"), stub, 0o700)
-	writeFixture(t, filepath.Join(dir, "sudo"), "#!/bin/sh\nunset GITHUB_METRICS_IMAGE\nexec \"$@\"\n", 0o700)
+	writeFixture(
+		t,
+		filepath.Join(dir, "sudo"),
+		"#!/bin/sh\nunset GITHUB_METRICS_IMAGE RECEIVER_RESOLV_CONF\nexec \"$@\"\n",
+		0o700,
+	)
 
 	// PATH limits the host tools the script can call.
-	for _, tool := range []string{"grep", "dirname", "mktemp", "rm"} {
+	for _, tool := range []string{"awk", "grep", "dirname", "mktemp", "rm"} {
 		path, lookErr := exec.LookPath(tool)
 		if lookErr != nil {
 			t.Fatal(lookErr)
@@ -138,22 +153,18 @@ printf '%s\0' "${GITHUB_METRICS_IMAGE:-}" "$image_line" "$@" > record
 	return dir
 }
 
-func runConfigured(t *testing.T, shell string, setup func(string), args ...string) result {
+func runConfigured(t *testing.T, shell string, setup func(string) []string, args ...string) result {
 	t.Helper()
 
 	dir := prepareUpFixture(t)
-	if setup != nil {
-		setup(dir)
-	}
 
-	argv := append([]string{"./up.sh"}, args...)
+	argv := append([]string{filepath.Join(dir, "up.sh")}, args...)
 	cmd := exec.CommandContext(t.Context(), shell, argv...)
-	cmd.Dir = dir
+	cmd.Dir = filepath.Dir(dir)
 	cmd.Env = []string{"PATH=" + dir, "LC_ALL=en_US.UTF-8"}
 
-	_, statErr := os.Stat(filepath.Join(dir, "use-sudo"))
-	if statErr == nil {
-		cmd.Env = append(cmd.Env, "DEPLOY_DOCKER_SUDO=1")
+	if setup != nil {
+		cmd.Env = append(cmd.Env, setup(dir)...)
 	}
 
 	out, err := cmd.CombinedOutput()
@@ -211,11 +222,16 @@ func checkRanIn(t *testing.T, shell, image string, args ...string) {
 		t.Fatalf("up.sh %s: exit %d, ran=%v: %s", image, res.code, res.ran, res.output)
 	}
 
+	path := filepath.Join(res.dir, resolverFile)
 	want := append(
 		[]string{
 			image,
 			"GITHUB_METRICS_IMAGE=" + image,
+			path,
+			resolverVar + `="` + path + `"`,
 			"compose",
+			envFile,
+			filepath.Join(res.dir, dotEnv),
 			envFile,
 			res.imageEnv,
 			"-f",
@@ -487,7 +503,8 @@ func TestReceiverServiceSettings(t *testing.T) {
 		"\n      - type: bind\n        source: >-\n" +
 			"          ${RECEIVER_RESOLV_CONF:?set RECEIVER_RESOLV_CONF to a resolv.conf\n" +
 			"          file that lists the upstream resolvers}\n" +
-			"        target: " + resolverMount + "\n        read_only: true\n",
+			"        target: " + resolverMount + "\n        read_only: true\n" +
+			"        bind:\n          create_host_path: false\n",
 		"\n    networks:\n      - edge\n      - metrics\n",
 	} {
 		if !strings.Contains(block, want) {
@@ -651,7 +668,7 @@ func TestComposeRequiresReceiverResolverFile(t *testing.T) {
 		return cmd.CombinedOutput()
 	}
 
-	out, renderErr := render("RECEIVER_RESOLV_CONF=" + resolverPath)
+	out, renderErr := render(resolverVar + "=" + resolverPath)
 	if renderErr != nil {
 		t.Fatalf("compose config with a resolver file: %v: %s", renderErr, out)
 	}
@@ -675,7 +692,7 @@ func badKeySource(t *testing.T, dir, kind string) {
 	}
 
 	switch kind {
-	case "directory":
+	case directory:
 		err = os.Mkdir(key, 0o700)
 	case "symlink":
 		err = os.Symlink("../up.sh", key)
@@ -689,12 +706,14 @@ func badKeySource(t *testing.T, dir, kind string) {
 func TestUpRequiresKeySource(t *testing.T) {
 	t.Parallel()
 
-	for _, kind := range []string{"missing", "directory", "symlink"} {
+	for _, kind := range []string{"missing", directory, "symlink"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Parallel()
 
-			res := runConfigured(t, "/bin/sh", func(dir string) {
+			res := runConfigured(t, "/bin/sh", func(dir string) []string {
 				badKeySource(t, dir, kind)
+
+				return nil
 			}, digest)
 			if res.code != 2 || res.ran || res.helper != "" ||
 				!strings.Contains(res.output, "must exist as a regular file") {
@@ -704,11 +723,67 @@ func TestUpRequiresKeySource(t *testing.T) {
 	}
 }
 
+func TestUpRequiresResolverFile(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []string{
+		"unset", "multiline value", "empty value", "missing", directory, "directory symlink", "empty file",
+	} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+
+			res := runConfigured(t, "/bin/sh", func(dir string) []string {
+				badResolverSource(t, dir, kind)
+
+				return nil
+			}, digest)
+
+			const message = "up.sh: " + resolverVar + " must name a non-empty regular file\n"
+			if res.code != 2 || res.ran || res.helper != "" || res.output != message {
+				t.Fatalf("resolver %s: exit %d, ran=%v: %s", kind, res.code, res.ran, res.output)
+			}
+		})
+	}
+}
+
+func badResolverSource(t *testing.T, dir, kind string) {
+	t.Helper()
+
+	path := filepath.Join(dir, resolverFile)
+
+	err := os.Remove(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	switch kind {
+	case "unset":
+		err = os.Remove(filepath.Join(dir, dotEnv))
+	case "multiline value":
+		writeFixture(t, path, "# test resolver\n", 0o600)
+		writeFixture(t, filepath.Join(dir, dotEnv), "NOTES='start\n"+resolverVar+"="+resolverFile+"\nend'\n", 0o600)
+	case "empty value":
+		writeFixture(t, filepath.Join(dir, dotEnv), resolverVar+"=\n", 0o600)
+	case directory:
+		err = os.Mkdir(path, 0o700)
+	case "directory symlink":
+		err = os.Symlink(dir, path)
+	case "empty file":
+		writeFixture(t, path, "", 0o600)
+	}
+
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestUpStopsAfterHelperFailure(t *testing.T) {
 	t.Parallel()
 
-	res := runConfigured(t, "/bin/sh", func(dir string) {
+	res := runConfigured(t, "/bin/sh", func(dir string) []string {
 		writeFixture(t, filepath.Join(dir, "helper-exit"), "1\n", 0o600)
+
+		return nil
 	}, digest)
 
 	if res.code == 0 || res.ran || res.helper == "" {
@@ -719,18 +794,29 @@ func TestUpStopsAfterHelperFailure(t *testing.T) {
 func TestUpWithSudoAndDotEnv(t *testing.T) {
 	t.Parallel()
 
-	res := runConfigured(t, "/bin/sh", func(dir string) {
-		writeFixture(t, filepath.Join(dir, "use-sudo"), "", 0o600)
-		writeFixture(t, filepath.Join(dir, ".env"),
-			"METRICS_NETWORK=metrics\nRECEIVER_RESOLV_CONF="+filepath.Join(dir, resolverFile)+"\n", 0o600)
+	const quotedResolver = "resolver file.conf"
+
+	res := runConfigured(t, "/bin/sh", func(dir string) []string {
+		path := filepath.Join(dir, quotedResolver)
+		writeFixture(t, path, "# test resolver\n", 0o600)
+		writeFixture(
+			t,
+			filepath.Join(dir, dotEnv),
+			"METRICS_NETWORK=metrics\n"+resolverVar+"='"+path+"' # test path\n",
+			0o600,
+		)
+
+		return []string{"DEPLOY_DOCKER_SUDO=1"}
 	}, digest)
 
 	want := []string{
 		"",
 		"GITHUB_METRICS_IMAGE=" + digest,
+		"",
+		resolverVar + `="` + filepath.Join(res.dir, quotedResolver) + `"`,
 		"compose",
 		envFile,
-		filepath.Join(res.dir, ".env"),
+		filepath.Join(res.dir, dotEnv),
 		envFile,
 		res.imageEnv,
 		"-f",
@@ -743,6 +829,23 @@ func TestUpWithSudoAndDotEnv(t *testing.T) {
 	got := strings.Split(strings.TrimSuffix(res.record, "\x00"), "\x00")
 	if res.code != 0 || !res.ran || !slices.Equal(got, want) {
 		t.Fatalf("sudo deployment: exit %d, got %q, want %q: %s", res.code, got, want, res.output)
+	}
+}
+
+func TestUpPrefersExportedResolver(t *testing.T) {
+	t.Parallel()
+
+	res := runConfigured(t, "/bin/sh", func(dir string) []string {
+		writeFixture(t, filepath.Join(dir, dotEnv), resolverVar+"=missing.conf\n", 0o600)
+
+		return []string{resolverVar + "=" + filepath.Join(dir, resolverFile)}
+	}, digest)
+
+	path := filepath.Join(res.dir, resolverFile)
+	want := "\x00" + path + "\x00" + resolverVar + `="` + path + `"` + "\x00"
+
+	if res.code != 0 || !res.ran || !strings.Contains(res.record, want) {
+		t.Fatalf("exported resolver: exit %d, ran=%v: %s", res.code, res.ran, res.output)
 	}
 }
 
