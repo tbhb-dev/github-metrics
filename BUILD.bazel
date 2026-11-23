@@ -110,6 +110,8 @@ GO_TARGETS = [
     "//internal/budget:budget_test",
     "//internal/ghclient",
     "//internal/ghclient:ghclient_test",
+    "//internal/reconcile",
+    "//internal/reconcile:reconcile_test",
     "//internal/recorder",
     "//internal/recorder:recorder_test",
     "//internal/receiver",
