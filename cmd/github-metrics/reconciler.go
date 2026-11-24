@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,7 @@ var (
 	errInvalidAppID            = errors.New(appIDEnv + " must be a positive integer")
 	errInvalidInstallationID   = errors.New(installationIDEnv + " must be a positive integer")
 	errInvalidBaseURL          = errors.New(apiURLEnv + " must be a valid HTTPS API base URL")
+	errInvalidCIBackfill       = errors.New("GITHUB_CI_BACKFILL must name a repository and days from 1 to 7")
 	errReadAppKey              = errors.New("read " + appKeyFileEnv)
 )
 
@@ -93,14 +95,36 @@ func reconcilerConfig(env func(string) string) (reconcileConfig, error) {
 	}, nil
 }
 
+// ciBackfillConfig validates the trigger even when reconciliation is disabled.
+func ciBackfillConfig(env func(string) string) (reconcile.CIConfig, error) {
+	const name = "GITHUB_CI_BACKFILL"
+
+	var cfg reconcile.CIConfig
+
+	value := env(name)
+	if value == "" {
+		return cfg, nil
+	}
+
+	match := regexp.MustCompile(`^([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*/[A-Za-z0-9_.-]+):([1-7])$`).FindStringSubmatch(value)
+	if match == nil || strings.HasSuffix(match[1], "/.") || strings.HasSuffix(match[1], "/..") {
+		return cfg, errInvalidCIBackfill
+	}
+
+	cfg.Repository = match[1]
+	cfg.Days = int(match[2][0] - '0')
+
+	return cfg, nil
+}
+
 //nolint:ireturn // The worker accepts either recorder through its interface.
 func newConsumers(
 	ctx context.Context, endpoint string, cfg reconcileConfig, meter metric.Meter, repo *store.Bolt, log *slog.Logger,
-) (worker.Recorder, *reconcile.Loop, error) {
+) (worker.Recorder, *reconcile.Loop, *ghclient.Client, error) {
 	// cspell:ignore contextcheck
 	consumer, err := newRecorder(endpoint, meter, repo, log) //nolint:contextcheck // Recorder setup seeds its counters.
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	log.InfoContext(ctx, "recorder mode", "configured", endpoint != "")
@@ -109,26 +133,26 @@ func newConsumers(
 	if !configured || cfg.keyFile == "" {
 		log.InfoContext(ctx, "reconciler disabled")
 
-		return consumer, nil, nil
+		return consumer, nil, nil, nil
 	}
 
-	loop, err := newReconciler(cfg, meter, record, repo, log)
+	loop, client, err := newReconciler(cfg, meter, record, repo, log)
 
-	return consumer, loop, err
+	return consumer, loop, client, err
 }
 
 func newReconciler(
 	cfg reconcileConfig, meter metric.Meter, record *recorder.Recorder, repo reconcile.Watermarks, log *slog.Logger,
-) (*reconcile.Loop, error) {
+) (*reconcile.Loop, *ghclient.Client, error) {
 	// Relative request paths must resolve inside the API base path.
 	base, err := url.Parse(strings.TrimRight(cfg.apiURL, "/") + "/")
 	if err != nil || base.Scheme != "https" {
-		return nil, errInvalidBaseURL
+		return nil, nil, errInvalidBaseURL
 	}
 
 	key, err := os.ReadFile(cfg.keyFile)
 	if err != nil {
-		return nil, errReadAppKey
+		return nil, nil, errReadAppKey
 	}
 
 	source, err := appauth.New(appauth.Config{
@@ -136,14 +160,14 @@ func newReconciler(
 		AppID: cfg.appID, InstallationID: cfg.installationID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create installation token source: %w", err)
+		return nil, nil, fmt.Errorf("create installation token source: %w", err)
 	}
 
 	tags := ghclient.NewETags()
 
 	client, err := ghclient.New(base.String(), http.DefaultClient, budget.New(), source, tags)
 	if err != nil {
-		return nil, errInvalidBaseURL
+		return nil, nil, errInvalidBaseURL
 	}
 
 	lister := reconcile.NewLister(client, tags, base)
@@ -153,10 +177,10 @@ func newReconciler(
 
 	loop, err := reconcile.NewLoop(pass, meter, log, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create reconciler loop: %w", err)
+		return nil, nil, fmt.Errorf("create reconciler loop: %w", err)
 	}
 
-	return loop, nil
+	return loop, client, nil
 }
 
 func startReconciler(ctx context.Context, loop *reconcile.Loop, stop context.CancelFunc) <-chan error {
