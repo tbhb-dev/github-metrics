@@ -36,6 +36,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/tbhb-dev/github-metrics/internal/receiver"
+	"github.com/tbhb-dev/github-metrics/internal/reconcile"
 	"github.com/tbhb-dev/github-metrics/internal/recorder"
 	"github.com/tbhb-dev/github-metrics/internal/store"
 	"github.com/tbhb-dev/github-metrics/internal/telemetry"
@@ -83,8 +84,14 @@ func main() {
 	}
 }
 
+//nolint:funlen // Startup owns service shutdown ordering.
 func run(ctx context.Context, addr string, log *slog.Logger) error {
 	cfg, err := reconcilerConfig(os.Getenv)
+	if err != nil {
+		return err
+	}
+
+	backfillCfg, err := ciBackfillConfig(os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -131,7 +138,7 @@ func run(ctx context.Context, addr string, log *slog.Logger) error {
 
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 
-	consumer, loop, err := newConsumers(ctx, endpoint, cfg, meter, repo, log)
+	consumer, loop, client, err := newConsumers(ctx, endpoint, cfg, meter, repo, log)
 	if err != nil {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 		defer cancel()
@@ -155,6 +162,18 @@ func run(ctx context.Context, addr string, log *slog.Logger) error {
 
 	log.InfoContext(ctx, "listening", "addr", addr)
 
+	backfillDone := make(chan struct{})
+
+	if client != nil && backfillCfg.Days > 0 {
+		go func() {
+			defer close(backfillDone)
+
+			reconcile.BackfillCI(ctx, client, repo, log, backfillCfg, time.Now())
+		}()
+	} else {
+		close(backfillDone)
+	}
+
 	select {
 	case err = <-serveErr:
 		// Shut down the worker and reconciler before closing their store.
@@ -165,6 +184,8 @@ func run(ctx context.Context, addr string, log *slog.Logger) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
+
+	<-backfillDone
 
 	return errors.Join(
 		err, srv.Shutdown(shutdownCtx), <-workerErr, <-reconcileErr, shutdownTelemetry(shutdownCtx), repo.Close(),

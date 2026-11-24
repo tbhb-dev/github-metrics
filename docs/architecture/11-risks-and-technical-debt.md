@@ -21,6 +21,8 @@
 | The operator never retires the previous webhook secret or never rotates the App key | An old credential keeps working | Gates of the threat-model follow-up, plan step 6 | New, deferred to step 6 |
 | Backend access and retention for private-repository names and logins | Wider exposure than the operator intends | The operator confirms it in the threat-model follow-up | Unverified |
 
+Tech debt: CI history backfill caps run and job pages without a resume cursor. A crash after a durable claim can lose a log. Backfilled claims also suppress later live timing metrics. The one-off Loki pass accepts these limits.
+
 ## Plan
 
 Step 1 finished. Steps 2, 3, and 5 to 8 remain open work. Today `main` has the receiver, the request budget, and the GitHub client, which are parts of steps 3 and 5.

@@ -9,6 +9,7 @@ repo_files()
 go_library(
     name = "reconcile",
     srcs = [
+        "cibackfill.go",
         "events.go",
         "list.go",
         "loop.go",
@@ -28,11 +29,14 @@ go_library(
 go_test(
     name = "reconcile_test",
     srcs = [
+        "cibackfill_test.go",
         "events_test.go",
         "list_test.go",
         "loop_test.go",
         "run_test.go",
     ],
+    data = glob(["testdata/**"]),
+    embedsrcs = ["testdata/ci_jobs.json"],
     visibility = ["//:__pkg__"],
     deps = [
         ":reconcile",
