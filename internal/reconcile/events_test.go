@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tbhb-dev/github-metrics/internal/budget"
 	"github.com/tbhb-dev/github-metrics/internal/reconcile"
 )
 
@@ -56,7 +57,7 @@ func TestFirstEndRules(t *testing.T) {
 				write(t, resp, "["+strings.Join(test.events, ",")+"]")
 			})
 
-			got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7)
+			got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7, budget.Incremental)
 			if err != nil || !got.At.Equal(test.at) || got.State != test.state || got.Pages != 1 ||
 				!slices.Equal(fake.requests, []string{eventsPath}) {
 				t.Errorf("got = %+v, err = %v, requests = %v", got, err, fake.requests)
@@ -73,7 +74,7 @@ func TestFirstEndPastThreePagesIsAmbiguous(t *testing.T) {
 		write(t, resp, "["+event(closedEvent, "2026-01-02T01:00:00Z")+"]")
 	})
 
-	got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7)
+	got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7, budget.Incremental)
 	if err != nil || !got.At.IsZero() || got.State != "" || got.Pages != reconcile.MaxEventPages ||
 		len(fake.requests) != reconcile.MaxEventPages {
 		t.Errorf("got = %+v, err = %v, requests = %v", got, err, fake.requests)
@@ -86,7 +87,7 @@ func TestFirstEndClearsTags(t *testing.T) {
 	fake := newRig(t, tagged(t, `"v1"`, "["+event(closedEvent, "2026-01-02T01:00:00Z")+"]"))
 
 	for range 2 {
-		got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7)
+		got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7, budget.Incremental)
 		if err != nil || got.At.IsZero() || got.Pages != 1 {
 			t.Fatalf("got = %+v, err = %v", got, err)
 		}
@@ -108,7 +109,7 @@ func TestFirstEndKeepsBasePath(t *testing.T) {
 		write(t, resp, "["+event(closedEvent, "2026-01-02T01:00:00Z")+"]")
 	})
 
-	got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7)
+	got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7, budget.Incremental)
 	if err != nil || got.At.IsZero() || !slices.Equal(fake.requests, []string{"/api/v3" + eventsPath}) {
 		t.Errorf("got = %+v, err = %v, requests = %v", got, err, fake.requests)
 	}
@@ -145,7 +146,7 @@ func TestFirstEndReadFailure(t *testing.T) {
 				write(t, resp, "[")
 			})
 
-			got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7)
+			got, err := fake.lister.FirstEnd(t.Context(), "o/r", 7, budget.Incremental)
 			_, decodeErr := errors.AsType[*json.SyntaxError](err)
 
 			if decodeErr == test.interrupted || errors.Is(err, io.ErrUnexpectedEOF) != test.interrupted ||

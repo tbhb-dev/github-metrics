@@ -9,11 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
 	"slices"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"github.com/tbhb-dev/github-metrics/internal/budget"
 	"github.com/tbhb-dev/github-metrics/internal/ghclient"
@@ -22,9 +26,10 @@ import (
 )
 
 const (
-	firstRepo = "o/first"
-	nextRepo  = "o/next"
-	lastRepo  = "o/last"
+	firstRepo  = "o/first"
+	nextRepo   = "o/next"
+	lastRepo   = "o/last"
+	listedRepo = "o/r"
 
 	closedState = "closed"
 )
@@ -51,7 +56,7 @@ func ended(reconcile.ClosedPR) reconcile.End {
 
 func (fake *runFake) ClearUpdated(repo string) { fake.cleared = append(fake.cleared, repo) }
 
-func (fake *runFake) FirstEnd(_ context.Context, repo string, number int) (reconcile.End, error) {
+func (fake *runFake) FirstEnd(_ context.Context, repo string, number int, _ budget.Priority) (reconcile.End, error) {
 	item := reconcile.ClosedPR{
 		CreatedAt: time.Time{}, MergedAt: time.Time{}, ClosedAt: time.Time{}, UpdatedAt: time.Time{},
 		NodeID: "", Body: "", Repository: repo, Number: number, Merged: false,
@@ -180,6 +185,116 @@ func TestRunRepairsMerges(t *testing.T) {
 	}
 }
 
+type getFunc func(ctx context.Context, priority budget.Priority, target string) (*ghclient.Response, error)
+
+func (get getFunc) Get(ctx context.Context, priority budget.Priority, target string) (*ghclient.Response, error) {
+	return get(ctx, priority, target)
+}
+
+func TestSweepRepairsPastTheWatermark(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		time.Sleep(sweepStart)
+
+		now := time.Now()
+		missed := closedItem(now.Add(-time.Hour), true)
+		lister := newSweepLister(t, now.Add(-24*time.Hour), missed)
+
+		var fake runFake
+
+		fake.watermarks = map[string]time.Time{listedRepo: now}
+		fake.record = func(got recorder.ClosedPR) (recorder.Outcome, error) {
+			if !got.MergedAt.Equal(missed.MergedAt) || !got.EndedAt.Equal(missed.ClosedAt) {
+				t.Errorf("record = %+v, want the missed pull request", got)
+			}
+
+			return recorder.Outcome{Merged: recorder.ResultRecorded, Ended: recorder.ResultRecorded}, nil
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		pass := func(ctx context.Context) (reconcile.RunResult, error) {
+			defer cancel()
+
+			got, runErr := reconcile.Run(ctx, lister, lister, &fake, &fake, runClock(now))
+			if runErr != nil || got.Result != reconcile.RunOK || got.Pages != 2 || got.Recorded != 1 ||
+				got.EndedRecorded != 1 || len(fake.wrote) != 0 {
+				t.Errorf("result = %+v, err = %v, watermark writes = %v", got, runErr, fake.wrote)
+			}
+
+			return got, nil
+		}
+
+		loop, err := reconcile.NewLoop(pass, noop.NewMeterProvider().Meter("test"), slog.New(slog.DiscardHandler), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		err = loop.Start(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func newSweepLister(t *testing.T, floor time.Time, missed reconcile.ClosedPR) *reconcile.Lister {
+	t.Helper()
+
+	older := closedItem(floor.Add(-time.Second), true)
+
+	pulls, err := json.Marshal([]reconcile.ClosedPR{missed, older})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tags := ghclient.NewETags()
+	ready := false
+	get := getFunc(func(_ context.Context, priority budget.Priority, target string) (*ghclient.Response, error) {
+		resp := ghclient.Response{ETag: "", Next: "", Body: nil, Status: http.StatusOK}
+
+		switch target {
+		case repoPage[1:]:
+			resp.Body = []byte(`{"repositories":[{"full_name":"` + listedRepo + `"}]}`)
+		case firstPage[1:]:
+			if ready && (priority != budget.Sweep || tags.Get(firstPage) != "") {
+				t.Errorf("pulls priority = %v, tag = %q, want sweep priority and no tag", priority, tags.Get(firstPage))
+			}
+
+			tags.Set(firstPage, `"first"`)
+			resp.Body, resp.Next = pulls, firstPage+"&page=2"
+		case eventsPath[1:]:
+			if priority != budget.Sweep {
+				t.Errorf("events priority = %v, want sweep priority", priority)
+			}
+
+			resp.Body = []byte("[" + event(closedEvent, missed.ClosedAt.Format(time.RFC3339)) + "]")
+		default:
+			t.Fatalf("unexpected request for %s", target)
+		}
+
+		return &resp, nil
+	})
+
+	var base url.URL
+
+	base.Path = "/"
+	lister := reconcile.NewLister(get, tags, &base)
+
+	// Prime the tag with a clean walk at the same floor.
+	_, err = lister.Updated(t.Context(), listedRepo, reconcile.WalkOptions{
+		Stop: floor, MaxPages: reconcile.DefaultMaxPages, Priority: budget.Incremental,
+	})
+	if err != nil || tags.Get(firstPage) == "" {
+		t.Fatalf("prime first-page tag: err = %v, tag = %q", err, tags.Get(firstPage))
+	}
+
+	ready = true
+
+	return lister
+}
+
 type failure struct {
 	err    error
 	result reconcile.RunStatus
@@ -292,8 +407,6 @@ func TestRunStoreErrors(t *testing.T) {
 func TestRunRetriesWatermarkWrite(t *testing.T) {
 	t.Parallel()
 
-	const repo = "o/r"
-
 	now := time.Date(2026, time.January, 2, 4, 0, 0, 0, time.UTC)
 	servePulls := tagged(t, `"first"`, "["+item("open", now.Format(time.RFC3339), "", "")+"]")
 	rig := newRig(t, func(resp http.ResponseWriter, req *http.Request, host string) {
@@ -309,19 +422,19 @@ func TestRunRetriesWatermarkWrite(t *testing.T) {
 	var fake runFake
 
 	previous := now.Add(-time.Hour)
-	fake.watermarks = map[string]time.Time{repo: previous}
+	fake.watermarks = map[string]time.Time{listedRepo: previous}
 	fake.writeErr = io.ErrClosedPipe
 
 	got, err := reconcile.Run(t.Context(), rig.lister, &fake, &fake, &fake, runClock(now))
 	if !errors.Is(err, io.ErrClosedPipe) || got.Result != reconcile.RunPartial ||
-		!fake.watermarks[repo].Equal(previous) || rig.etags.Get(rig.base+firstPage) != "" {
+		!fake.watermarks[listedRepo].Equal(previous) || rig.etags.Get(rig.base+firstPage) != "" {
 		t.Fatalf("first pass = %+v, err = %v, watermarks = %v", got, err, fake.watermarks)
 	}
 
 	fake.writeErr = nil
 
 	got, err = reconcile.Run(t.Context(), rig.lister, &fake, &fake, &fake, runClock(now))
-	if err != nil || got.Result != reconcile.RunOK || got.NotModified != 0 || !fake.watermarks[repo].Equal(now) {
+	if err != nil || got.Result != reconcile.RunOK || got.NotModified != 0 || !fake.watermarks[listedRepo].Equal(now) {
 		t.Errorf("retry = %+v, err = %v, watermarks = %v", got, err, fake.watermarks)
 	}
 }
