@@ -86,9 +86,9 @@ func recordCycleFixture(t *testing.T, test cycleTimeTest) (*sdkmetric.ManualRead
 	}
 
 	body, err := json.Marshal(map[string]any{
-		"repository": map[string]string{"full_name": repositoryName},
-		"action":     test.action,
-		"pull_request": map[string]any{
+		repositoryKey: map[string]string{fullNameKey: repositoryName},
+		"action":      test.action,
+		pullRequestEvent: map[string]any{
 			"node_id": nodeID, "merged": test.merged, "created_at": test.createdAt,
 			"merged_at": test.end, "closed_at": test.end, "body": test.body,
 		},
@@ -245,6 +245,8 @@ const (
 	eventKey          = "event"
 	eventsName        = "github.events"
 	repositoryKey     = "repository"
+	fullNameKey       = "full_name"
+	mainBranch        = "main"
 	unknownRepository = "unknown"
 	buildName         = "build"
 	conclusionKey     = "conclusion"
@@ -484,8 +486,6 @@ type mainRedStep struct {
 func TestRecordMainRed(t *testing.T) {
 	t.Parallel()
 
-	const mainBranch = "main"
-
 	for _, test := range []struct {
 		name  string
 		steps []mainRedStep
@@ -525,8 +525,8 @@ func TestRecordMainRed(t *testing.T) {
 
 			for _, step := range test.steps {
 				body, err := json.Marshal(map[string]any{
-					"repository": map[string]string{
-						"full_name":      repositoryName,
+					repositoryKey: map[string]string{
+						fullNameKey:      repositoryName,
 						"default_branch": step.defaultBranch,
 					},
 					"action": step.action,

@@ -134,9 +134,20 @@ The start is the earliest of all those times, so a non-agent commit that predate
 
 Only the first end of a PR counts. If a reopened PR ends again, the stored `ended` milestone blocks a second observation.
 
-Every histogram is an exponential (native) histogram, with the SDK's default limit of 160 buckets. Over a range of 1 second to 30 days, 160 buckets give a scale of 2, which means each bucket spans a ratio of about 1.19 and a quantile estimate is off by about 9% at most. Goal thresholds of 600 s and 900 s sit inside a bucket, not on an edge, so a goal check has the same error. D15 records the choice, the fallback, and the backend check. Each attribute set exports one native histogram series, with the count and sum inside it, if Mimir ingests native histograms (unverified).
+Completed CI jobs record queue and run durations for every conclusion:
 
-The metric attributes are `vcs.repository.name`, and `github.author.type` with the values `user` or `bot`. The review counter adds `github.review.state`, and the cycle time histogram adds `vcs.change.state` and `github.pull_request.start_source`.
+| Instrument | Unit | Start | End | Attributes |
+| --- | --- | --- | --- | --- |
+| `github.ci.job.queue_seconds` | `s` | Job `created_at` | Job `started_at` | `repository`, `workflow`, `job`, `conclusion`, `event_class` and `runner` |
+| `github.ci.job.run_seconds` | `s` | Job `started_at` | Job `completed_at` | `repository`, `workflow`, `job`, `conclusion`, `event_class` and `runner` |
+
+The workflow and job names come from `workflow_name` and `name`. The runner comes from the first `labels` entry or `none` for an empty or missing array. Each attribute removes line breaks and keeps at most 64 characters. Both histograms use explicit boundaries of 5, 15, 30, 60, 120, 300, 600, 900, 1200, 1800, 2700, 3600, 5400 and 7200 seconds. A missing or invalid timestamp skips that duration. A negative duration also skips that observation. The ledger claims the decimal job ID followed by a zero byte and `ci_job` before recording. Jobs without an ID skip recording. A duplicate claim skips all metrics and logs for that delivery; a claim error leaves it for retry.
+
+The `event_class` attribute approximates the trigger because the payload has no triggering event. A `head_branch` with the prefix `gh-readonly-queue/` counts as `merge_group`. The repository's default branch counts as `push`; any other branch counts as `pull_request`. Scheduled and manual runs on the default branch count as `push`, and runs on a non-default branch from other triggers count as `pull_request`.
+
+Every PR histogram is an exponential (native) histogram, with the SDK's default limit of 160 buckets. Over a range of 1 second to 30 days, 160 buckets give a scale of 2, which means each bucket spans a ratio of about 1.19 and a quantile estimate is off by about 9% at most. Goal thresholds of 600 s and 900 s sit inside a bucket, not on an edge, so a goal check has the same error. D15 records the choice, the fallback, and the backend check. Each attribute set exports one native histogram series, with the count and sum inside it, if Mimir ingests native histograms (unverified).
+
+The PR metric attributes are `vcs.repository.name`, and `github.author.type` with the values `user` or `bot`. The review counter adds `github.review.state`, and the cycle time histogram adds `vcs.change.state` and `github.pull_request.start_source`.
 
 ### Direct metrics, not derived from traces
 
