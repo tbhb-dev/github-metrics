@@ -16,7 +16,12 @@ import (
 const (
 	passInterval = 15 * time.Minute
 	passTimeout  = 14 * time.Minute
+	// A sweep gets 45 minutes to read the full repair window at the shared request rate.
+	sweepTimeout = 45 * time.Minute
+	sweepHour    = 3
+
 	incremental  = "incremental"
+	sweep        = "sweep"
 	metricPrefix = "github_metrics.reconcile."
 	seconds      = "s"
 
@@ -32,7 +37,7 @@ type LoopClock interface {
 	NewTicker(interval time.Duration) (<-chan time.Time, func())
 }
 
-// Loop schedules and reports incremental reconciliation passes.
+// Loop schedules and reports incremental passes and daily sweeps.
 type Loop struct {
 	pass          Pass
 	clock         LoopClock
@@ -84,13 +89,26 @@ func (l *Loop) Start(ctx context.Context) error {
 		return nil
 	}
 
+	started := l.clock.Now()
+
+	nextSweep := sweepTime(started)
+	if started.After(nextSweep) {
+		nextSweep = nextSweep.AddDate(0, 0, 1)
+	}
+
 	ticks, stop := l.clock.NewTicker(passInterval)
 	defer stop()
 
 	consecutiveErrors := 0
 
 	for {
-		finished, err := l.runPass(ctx)
+		kind := incremental
+		if !started.Before(nextSweep) {
+			kind = sweep
+			nextSweep = sweepTime(started).AddDate(0, 0, 1)
+		}
+
+		finished, err := l.runPass(ctx, kind, started)
 		if err != nil {
 			consecutiveErrors++
 		} else {
@@ -104,7 +122,15 @@ func (l *Loop) Start(ctx context.Context) error {
 		if !waitForNextPass(ctx, ticks, finished) {
 			return nil
 		}
+
+		started = l.clock.Now()
 	}
+}
+
+func sweepTime(now time.Time) time.Time {
+	year, month, day := now.UTC().Date()
+
+	return time.Date(year, month, day, sweepHour, 0, 0, 0, time.UTC)
 }
 
 func waitForNextPass(ctx context.Context, ticks <-chan time.Time, finished time.Time) bool {
@@ -121,9 +147,17 @@ func waitForNextPass(ctx context.Context, ticks <-chan time.Time, finished time.
 	}
 }
 
-func (l *Loop) runPass(ctx context.Context) (time.Time, error) {
-	started := l.clock.Now()
-	passCtx, cancel := context.WithTimeout(ctx, passTimeout)
+// sweepPassKey marks a sweep through the pass callback that calls Run.
+type sweepPassKey struct{}
+
+func (l *Loop) runPass(ctx context.Context, kind string, started time.Time) (time.Time, error) {
+	timeout := passTimeout
+	if kind == sweep {
+		timeout = sweepTimeout
+		ctx = context.WithValue(ctx, sweepPassKey{}, true)
+	}
+
+	passCtx, cancel := context.WithTimeout(ctx, timeout)
 	result, err := l.pass(passCtx)
 
 	cancel()
@@ -137,14 +171,14 @@ func (l *Loop) runPass(ctx context.Context) (time.Time, error) {
 		level = slog.LevelError
 	}
 
-	kind := attribute.String("kind", incremental)
-	kindOnly := metric.WithAttributes(kind)
+	kindAttr := attribute.String("kind", kind)
+	kindOnly := metric.WithAttributes(kindAttr)
 
-	l.runs.Add(ctx, 1, metric.WithAttributes(kind, attribute.String("result", string(result.Result))))
+	l.runs.Add(ctx, 1, metric.WithAttributes(kindAttr, attribute.String("result", string(result.Result))))
 	l.duration.Record(ctx, elapsed.Seconds(), kindOnly)
 
 	// RunResult currently counts recorded merges. First ends arrive with the issue events read.
-	l.repairs.Add(ctx, int64(result.Recorded), metric.WithAttributes(kind, attribute.String("milestone", "merged")))
+	l.repairs.Add(ctx, int64(result.Recorded), metric.WithAttributes(kindAttr, attribute.String("milestone", "merged")))
 
 	if result.Result == RunOK {
 		l.lastSuccess.Record(ctx, finished.Unix(), kindOnly)
@@ -152,7 +186,7 @@ func (l *Loop) runPass(ctx context.Context) (time.Time, error) {
 
 	l.log.LogAttrs(
 		ctx, level, "reconcile pass finished",
-		slog.String("kind", incremental), slog.String("result", string(result.Result)),
+		slog.String("kind", kind), slog.String("result", string(result.Result)),
 		slog.Int("repos", result.Repositories), slog.Int("pages", result.Pages),
 		slog.Int("not_modified", result.NotModified), slog.Int("recorded", result.Recorded),
 		slog.Int("already_counted", result.AlreadyCounted), slog.Int("truncated", result.Truncated),

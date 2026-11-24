@@ -40,11 +40,11 @@ type issueEvent struct {
 	Event     string    `json:"event"`
 }
 
-// FirstEnd reads a pull request's issue events at incremental priority and
-// returns the first end. Each page clears its tag first, because the client
+// FirstEnd reads a pull request's issue events and returns the first end.
+// Each page clears its tag first, because the client
 // would answer 304 with an empty body for a URL it saw before.
-func (l *Lister) FirstEnd(ctx context.Context, repo string, number int) (End, error) {
-	events, pages, complete, err := l.events(ctx, repo, number)
+func (l *Lister) FirstEnd(ctx context.Context, repo string, number int, priority budget.Priority) (End, error) {
+	events, pages, complete, err := l.events(ctx, repo, number, priority)
 	end := End{At: time.Time{}, State: "", Pages: pages}
 
 	if err != nil || !complete {
@@ -76,7 +76,9 @@ func (l *Lister) FirstEnd(ctx context.Context, repo string, number int) (End, er
 
 // events returns the events of up to MaxEventPages pages. The bool is false
 // when more pages remain.
-func (l *Lister) events(ctx context.Context, repo string, number int) ([]issueEvent, int, bool, error) {
+func (l *Lister) events(ctx context.Context, repo string, number int, priority budget.Priority) (
+	[]issueEvent, int, bool, error,
+) {
 	var events []issueEvent
 
 	target := "repos/" + repo + "/issues/" + strconv.Itoa(number) + "/events?per_page=100"
@@ -84,7 +86,7 @@ func (l *Lister) events(ctx context.Context, repo string, number int) ([]issueEv
 	for page := 1; ; page++ {
 		l.clear(target)
 
-		resp, err := l.fetch(ctx, budget.Incremental, target, page)
+		resp, err := l.fetch(ctx, priority, target, page)
 		if err != nil {
 			return nil, page - 1, false, err
 		}

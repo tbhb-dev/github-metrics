@@ -32,7 +32,7 @@ type RepositoryLister interface {
 
 // EndReader reads the first end of a pull request from its issue events.
 type EndReader interface {
-	FirstEnd(ctx context.Context, repo string, number int) (End, error)
+	FirstEnd(ctx context.Context, repo string, number int, priority budget.Priority) (End, error)
 }
 
 // ClosedRecorder claims and records pull request milestones.
@@ -74,16 +74,19 @@ type RunResult struct {
 	EndedTooOld, EndedPreFloor, Ambiguous               int
 }
 
-// Run walks the installation once and repairs merge and ended counts. A
-// watermark moves forward only after the whole window has been walked and its
-// items processed.
+// Run walks the installation once and repairs merge and ended counts. A sweep
+// from Loop walks the full repair window. A watermark moves forward only when
+// the walk reaches the stop time and processes every item.
 func Run(
 	ctx context.Context, lister RepositoryLister, events EndReader, record ClosedRecorder, store Watermarks,
 	clock Clock,
 ) (RunResult, error) {
 	var result RunResult
 
-	floor := clock.Now().Add(-repairWindow)
+	opts := WalkOptions{Stop: clock.Now().Add(-repairWindow), MaxPages: DefaultMaxPages, Priority: budget.Incremental}
+	if ctx.Value(sweepPassKey{}) != nil {
+		opts.MaxPages, opts.Priority = SweepMaxPages, budget.Sweep
+	}
 
 	repos, truncated, err := lister.Repositories(ctx)
 	if err != nil {
@@ -104,7 +107,7 @@ func Run(
 			break
 		}
 
-		stop, repairErr := repairRepository(ctx, lister, events, record, store, repository.FullName, floor, &result)
+		stop, repairErr := repairRepository(ctx, lister, events, record, store, repository.FullName, opts, &result)
 		if repairErr != nil {
 			result.Result = RunPartial
 
@@ -121,20 +124,20 @@ func Run(
 
 func repairRepository(
 	ctx context.Context, lister RepositoryLister, events EndReader, record ClosedRecorder, store Watermarks,
-	repo string, floor time.Time, result *RunResult,
+	repo string, opts WalkOptions, result *RunResult,
 ) (bool, error) {
 	watermark, err := store.Watermark(repo)
 	if err != nil {
 		return false, fmt.Errorf("read reconcile watermark: %w", err)
 	}
 
-	stop := floor
-	if overlap := watermark.Add(-watermarkOverlap); overlap.After(stop) {
-		stop = overlap
+	if opts.Priority == budget.Sweep {
+		lister.ClearUpdated(repo)
+	} else if overlap := watermark.Add(-watermarkOverlap); overlap.After(opts.Stop) {
+		opts.Stop = overlap
 	}
 
 	result.Repositories++
-	opts := WalkOptions{Stop: stop, MaxPages: DefaultMaxPages, Priority: budget.Incremental}
 	walked, err := lister.Updated(ctx, repo, opts)
 	result.Pages += walked.Pages
 
@@ -153,9 +156,9 @@ func repairRepository(
 		result.Result = RunPartial
 	}
 
-	// A 304 would hide items this pass couldn't finish, so clear the tag first.
-	read, err := recordItems(ctx, events, record, walked.Items, result)
+	read, err := recordItems(ctx, events, record, walked.Items, opts.Priority, result)
 	if read != readsComplete || err != nil {
+		// A 304 would hide items this pass couldn't finish.
 		lister.ClearUpdated(repo)
 
 		return read == stopPass, err
@@ -202,7 +205,8 @@ func handleReadError(result *RunResult, err error) readOutcome {
 // recordItems records each item's merge and first end. An events read failure
 // reports whether to skip the repository or stop the pass.
 func recordItems(
-	ctx context.Context, events EndReader, record ClosedRecorder, items []ClosedPR, result *RunResult,
+	ctx context.Context, events EndReader, record ClosedRecorder, items []ClosedPR, priority budget.Priority,
+	result *RunResult,
 ) (readOutcome, error) {
 	for _, item := range items {
 		if item.ClosedAt.IsZero() {
@@ -211,7 +215,7 @@ func recordItems(
 			continue
 		}
 
-		end, err := events.FirstEnd(ctx, item.Repository, item.Number)
+		end, err := events.FirstEnd(ctx, item.Repository, item.Number, priority)
 		result.Pages += end.Pages
 
 		if err != nil {
