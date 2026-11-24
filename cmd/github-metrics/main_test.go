@@ -271,3 +271,23 @@ func TestReconcilerConfigComplete(t *testing.T) {
 		}
 	}
 }
+
+func TestCIBackfillConfig(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{
+		"", "o/r:7", "o/r:1", "o/r:8", "o/r:0", "o/r:-1",
+		"o/r:day", "o/r", "o:7", "o/r/extra:7", "o/..:7", "o/r:7\n",
+	} {
+		cfg, err := ciBackfillConfig(func(string) string { return value })
+		valid := value == "" || value == "o/r:7" || value == "o/r:1"
+
+		if valid {
+			if err != nil || (value != "" && (cfg.Repository != "o/r" || cfg.Days < 1 || cfg.Days > 7)) {
+				t.Fatalf("config = %+v, error = %v", cfg, err)
+			}
+		} else if err == nil || err.Error() != "GITHUB_CI_BACKFILL must name a repository and days from 1 to 7" {
+			t.Fatalf("expected redacted variable error, got %v", err)
+		}
+	}
+}

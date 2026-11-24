@@ -110,6 +110,12 @@ type workflowJob struct {
 	RunID int64 `json:"run_id"` //nolint:tagliatelle // GitHub uses this field name.
 }
 
+// WorkflowJob is the shared GitHub job payload.
+type WorkflowJob = workflowJob
+
+// JobEventClass uses the live recorder's branch classification.
+func JobEventClass(branch, defaultBranch string) string { return jobEventClass(branch, defaultBranch) }
+
 type pullRequest struct {
 	Body      string `json:"body"`
 	NodeID    string `json:"node_id"`    //nolint:tagliatelle // GitHub uses this field name.
