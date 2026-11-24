@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -76,7 +77,7 @@ type ClosedPR struct {
 type Recorder struct {
 	events, merges, conclusions, dropped metric.Int64Counter
 	ciJobFailures                        metric.Int64Counter
-	cycleTime                            metric.Float64Histogram
+	cycleTime, ciJobQueue, ciJobRun      metric.Float64Histogram
 	mainRed                              metric.Int64Gauge
 	ledger                               Ledger
 	log                                  *slog.Logger
@@ -92,17 +93,20 @@ type checkRun struct {
 }
 
 type workflowJob struct {
-	WorkflowName string `json:"workflow_name"` //nolint:tagliatelle // GitHub uses this field name.
-	Name         string `json:"name"`
-	Conclusion   string `json:"conclusion"`
-	HeadBranch   string `json:"head_branch"`  //nolint:tagliatelle // GitHub uses this field name.
-	HeadSHA      string `json:"head_sha"`     //nolint:tagliatelle // GitHub uses this field name.
-	StartedAt    string `json:"started_at"`   //nolint:tagliatelle // GitHub uses this field name.
-	CompletedAt  string `json:"completed_at"` //nolint:tagliatelle // GitHub uses this field name.
+	CreatedAt    string   `json:"created_at"` //nolint:tagliatelle // GitHub uses this field name.
+	Labels       []string `json:"labels"`
+	WorkflowName string   `json:"workflow_name"` //nolint:tagliatelle // GitHub uses this field name.
+	Name         string   `json:"name"`
+	Conclusion   string   `json:"conclusion"`
+	HeadBranch   string   `json:"head_branch"`  //nolint:tagliatelle // GitHub uses this field name.
+	HeadSHA      string   `json:"head_sha"`     //nolint:tagliatelle // GitHub uses this field name.
+	StartedAt    string   `json:"started_at"`   //nolint:tagliatelle // GitHub uses this field name.
+	CompletedAt  string   `json:"completed_at"` //nolint:tagliatelle // GitHub uses this field name.
 	Steps        []struct {
 		Name       string `json:"name"`
 		Conclusion string `json:"conclusion"`
 	} `json:"steps"`
+	ID    int64 `json:"id"`
 	RunID int64 `json:"run_id"` //nolint:tagliatelle // GitHub uses this field name.
 }
 
@@ -118,7 +122,7 @@ type pullRequest struct {
 // New creates the instruments used to record deliveries. The ledger claims
 // each milestone before it counts.
 //
-//nolint:mnd // The histogram has fixed cycle time buckets in seconds.
+//nolint:mnd // The histograms have fixed duration buckets in seconds.
 func New(meter metric.Meter, ledger Ledger, log *slog.Logger) (*Recorder, error) {
 	if ledger == nil {
 		return nil, ErrNoLedger
@@ -160,6 +164,22 @@ func New(meter metric.Meter, ledger Ledger, log *slog.Logger) (*Recorder, error)
 		))
 	if err != nil {
 		return nil, fmt.Errorf("create github.pr.cycle_time histogram: %w", err)
+	}
+
+	for _, histogram := range []struct {
+		target *metric.Float64Histogram
+		name   string
+	}{
+		{&recorder.ciJobQueue, "github.ci.job.queue_seconds"},
+		{&recorder.ciJobRun, "github.ci.job.run_seconds"},
+	} {
+		instrument, histErr := meter.Float64Histogram(histogram.name, metric.WithUnit("s"),
+			metric.WithExplicitBucketBoundaries(5, 15, 30, 60, 120, 300, 600, 900, 1200, 1800, 2700, 3600, 5400, 7200))
+		if histErr != nil {
+			return nil, fmt.Errorf("create %s histogram: %w", histogram.name, histErr)
+		}
+
+		*histogram.target = instrument
 	}
 
 	recorder.mainRed, err = meter.Int64Gauge("github.main.red")
@@ -215,19 +235,20 @@ func (r *Recorder) Record(ctx context.Context, event string, body []byte) error 
 		}
 	}
 
-	repo := attribute.String("repository", repository)
-	r.merges.Add(ctx, 0, metric.WithAttributes(repo))
+	if event == "workflow_job" && delivery.Action == actionCompleted {
+		return r.recordJob(ctx, repository, delivery.Repository.DefaultBranch, delivery.WorkflowJob)
+	}
 
-	eventAttrs := metric.WithAttributes(repo,
-		attribute.String("event", event), attribute.String("action", delivery.Action))
-	r.events.Add(ctx, 0, eventAttrs)
-	r.events.Add(ctx, 1, eventAttrs)
+	r.recordEvent(ctx, repository, event, delivery.Action)
 
-	switch {
-	case event == "check_run":
-		r.recordCheckRun(ctx, repo, delivery.Action, delivery.Repository.DefaultBranch, delivery.CheckRun)
-	case event == "workflow_job" && delivery.Action == actionCompleted:
-		r.recordFailedJob(ctx, repository, delivery.WorkflowJob)
+	if event == "check_run" {
+		r.recordCheckRun(
+			ctx,
+			attribute.String("repository", repository),
+			delivery.Action,
+			delivery.Repository.DefaultBranch,
+			delivery.CheckRun,
+		)
 	}
 
 	return nil
@@ -270,6 +291,16 @@ func (r *Recorder) RecordClosed(ctx context.Context, closed ClosedPR) (Outcome, 
 	}
 
 	return out, err
+}
+
+func (r *Recorder) recordEvent(ctx context.Context, repository, event, action string) {
+	repo := attribute.String("repository", repository)
+	r.merges.Add(ctx, 0, metric.WithAttributes(repo))
+
+	eventAttrs := metric.WithAttributes(repo,
+		attribute.String("event", event), attribute.String("action", action))
+	r.events.Add(ctx, 0, eventAttrs)
+	r.events.Add(ctx, 1, eventAttrs)
 }
 
 // recordPullRequest handles a closed or reopened delivery. For a PR created
@@ -334,14 +365,98 @@ func (r *Recorder) recordCheckRun(
 	r.mainRed.Record(ctx, red, metric.WithAttributes(repo))
 }
 
-func (r *Recorder) recordFailedJob(ctx context.Context, repository string, body json.RawMessage) {
+func (r *Recorder) recordJob(
+	ctx context.Context,
+	repository, defaultBranch string,
+	body json.RawMessage,
+) error {
 	var job workflowJob
 
 	err := json.Unmarshal(body, &job)
-	if err != nil || job.Conclusion != failure {
-		return
+	if err != nil || job.ID == 0 {
+		return nil //nolint:nilerr // Invalid job data may leave the queue.
 	}
 
+	claimed, err := r.ledger.ClaimMilestone(strconv.FormatInt(job.ID, 10) + "\x00ci_job")
+	if err != nil {
+		return fmt.Errorf("claim ci job milestone: %w", err)
+	}
+
+	if !claimed {
+		return nil
+	}
+
+	r.recordJobTiming(ctx, repository, defaultBranch, job)
+
+	if job.Conclusion == failure {
+		r.recordFailedJob(ctx, repository, job)
+	}
+
+	r.recordEvent(ctx, repository, "workflow_job", actionCompleted)
+
+	return nil
+}
+
+func (r *Recorder) recordJobTiming(ctx context.Context, repository, defaultBranch string, job workflowJob) {
+	eventClass, runner := jobEventClass(job.HeadBranch, defaultBranch), "none"
+	if len(job.Labels) > 0 {
+		runner = job.Labels[0]
+	}
+
+	values := []struct{ key, value string }{
+		{"repository", repository},
+		{"workflow", job.WorkflowName},
+		{"job", job.Name},
+		{"conclusion", job.Conclusion},
+		{"event_class", eventClass},
+		{"runner", runner},
+	}
+	attrs := make([]attribute.KeyValue, 0, len(values))
+	fields := []any{}
+
+	for _, field := range values {
+		attrs = append(attrs, attribute.String(field.key, cleanText(field.value, metricNameLimit)))
+		fields = append(fields, field.key, cleanText(field.value, logTextLimit))
+	}
+
+	fields = append(fields,
+		"head_branch", cleanText(job.HeadBranch, logTextLimit),
+		"head_sha", cleanText(job.HeadSHA, logTextLimit), "run_id", job.RunID, "job_id", job.ID)
+
+	for _, duration := range []struct {
+		histogram        metric.Float64Histogram
+		name, start, end string
+	}{
+		{r.ciJobQueue, "queue_seconds", job.CreatedAt, job.StartedAt},
+		{r.ciJobRun, "run_seconds", job.StartedAt, job.CompletedAt},
+	} {
+		start, end := parseTime(duration.start), parseTime(duration.end)
+		if start.IsZero() || end.IsZero() || end.Before(start) {
+			continue
+		}
+
+		seconds := end.Sub(start).Seconds()
+		duration.histogram.Record(ctx, seconds, metric.WithAttributes(attrs...))
+		fields = append(fields, duration.name, seconds)
+	}
+
+	r.log.InfoContext(ctx, "ci job finished", fields...)
+}
+
+// jobEventClass approximates the trigger: scheduled and manual runs on the default
+// branch count as push, and other triggers on non-default branches count as pull_request.
+func jobEventClass(branch, defaultBranch string) string {
+	switch {
+	case strings.HasPrefix(branch, "gh-readonly-queue/"):
+		return "merge_group"
+	case branch == defaultBranch:
+		return "push"
+	default:
+		return "pull_request"
+	}
+}
+
+func (r *Recorder) recordFailedJob(ctx context.Context, repository string, job workflowJob) {
 	var failedSteps []string
 
 	for _, step := range job.Steps {
