@@ -138,10 +138,10 @@ Completed CI jobs record queue and run durations for every conclusion:
 
 | Instrument | Unit | Start | End | Attributes |
 | --- | --- | --- | --- | --- |
-| `github.ci.job.queue_seconds` | `s` | Job `created_at` | Job `started_at` | `repository`, `workflow`, `job`, `conclusion`, `event_class` and `runner` |
-| `github.ci.job.run_seconds` | `s` | Job `started_at` | Job `completed_at` | `repository`, `workflow`, `job`, `conclusion`, `event_class` and `runner` |
+| `github.ci.job.queue_seconds` | `s` | Job `created_at` | Job `started_at` | `repository`, `workflow`, `ci_job`, `conclusion`, `event_class` and `runner` |
+| `github.ci.job.run_seconds` | `s` | Job `started_at` | Job `completed_at` | `repository`, `workflow`, `ci_job`, `conclusion`, `event_class` and `runner` |
 
-The workflow and job names come from `workflow_name` and `name`. The runner comes from the first `labels` entry or `none` for an empty or missing array. Each attribute removes line breaks and keeps at most 64 characters. Both histograms use explicit boundaries of 5, 15, 30, 60, 120, 300, 600, 900, 1200, 1800, 2700, 3600, 5400 and 7200 seconds. A missing or invalid timestamp skips that duration. A negative duration also skips that observation. The ledger claims the decimal job ID followed by a zero byte and `ci_job` before recording. Jobs without an ID skip recording. A duplicate claim skips all metrics and logs for that delivery; a claim error leaves it for retry.
+The workflow and job names come from `workflow_name` and `name`. The job name uses the attribute `ci_job` because the scrape `job` label overwrites a `job` attribute. The `ci_job_failures_total` counter uses `ci_job` too, and the log fields keep the name `job`. The runner comes from the first `labels` entry or `none` for an empty or missing array. Each attribute removes line breaks and keeps at most 64 characters. Both histograms use explicit boundaries of 5, 15, 30, 60, 120, 300, 600, 900, 1200, 1800, 2700, 3600, 5400 and 7200 seconds. A missing or invalid timestamp skips that duration. A negative duration also skips that observation. The ledger claims the decimal job ID followed by a zero byte and `ci_job` before recording. Jobs without an ID skip recording. A duplicate claim skips all metrics and logs for that delivery; a claim error leaves it for retry.
 
 The `event_class` attribute approximates the trigger because the payload has no triggering event. A `head_branch` with the prefix `gh-readonly-queue/` counts as `merge_group`. The repository's default branch counts as `push`; any other branch counts as `pull_request`. Scheduled and manual runs on the default branch count as `push`, and runs on a non-default branch from other triggers count as `pull_request`.
 
