@@ -24,6 +24,7 @@ const (
 	failureResult    = "failure"
 	workflowKey      = "workflow"
 	jobKey           = "job"
+	ciJobKey         = "ci_job"
 	completedAtKey   = "completed_at"
 	headSHAKey       = "head_sha"
 	queueMetric      = "github.ci.job.queue_seconds"
@@ -89,7 +90,7 @@ func TestRecordFailedWorkflowJob(t *testing.T) {
 
 	if got := collectCounters(t, reader)[ciFailuresName]; !reflect.DeepEqual(
 		got,
-		map[string]int64{"job=build,repository=tbhb-dev/github-metrics,workflow=CI": 1},
+		map[string]int64{"ci_job=build,repository=tbhb-dev/github-metrics,workflow=CI": 1},
 	) {
 		t.Fatalf("failure counter = %v", got)
 	}
@@ -193,7 +194,7 @@ func TestFailedWorkflowJobCleansText(t *testing.T) {
 	})
 	checkMetrics(t, reader, map[string]map[string]string{
 		eventsName:     {repositoryKey: unknownRepository, eventKey: workflowJobEvent, actionKey: completedAction},
-		ciFailuresName: {repositoryKey: unknownRepository, workflowKey: labelText, jobKey: labelText},
+		ciFailuresName: {repositoryKey: unknownRepository, workflowKey: labelText, ciJobKey: labelText},
 	})
 }
 
@@ -371,7 +372,7 @@ func checkJobHistogramPoint(t *testing.T, measurement metricdata.Metrics, class,
 	}
 
 	wantAttrs := map[string]string{
-		repositoryKey: repositoryName, workflowKey: "CI", jobKey: buildName,
+		repositoryKey: repositoryName, workflowKey: "CI", ciJobKey: buildName,
 		conclusionKey: conclusion, eventClassKey: class, runnerKey: runner,
 	}
 	bounds := []float64{5, 15, 30, 60, 120, 300, 600, 900, 1200, 1800, 2700, 3600, 5400, 7200}

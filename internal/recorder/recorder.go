@@ -421,7 +421,13 @@ func (r *Recorder) recordJobTiming(ctx context.Context, repository, defaultBranc
 	fields := []any{}
 
 	for _, field := range values {
-		attrs = append(attrs, attribute.String(field.key, cleanText(field.value, metricNameLimit)))
+		// The scrape job label overwrites a job attribute, so the metric uses ci_job. Logs keep job.
+		attrKey := field.key
+		if attrKey == "job" {
+			attrKey = "ci_job"
+		}
+
+		attrs = append(attrs, attribute.String(attrKey, cleanText(field.value, metricNameLimit)))
 		fields = append(fields, field.key, cleanText(field.value, logTextLimit))
 	}
 
@@ -491,7 +497,7 @@ func (r *Recorder) recordFailedJob(ctx context.Context, repository string, job w
 	r.ciJobFailures.Add(ctx, 1, metric.WithAttributes(
 		attribute.String(repositoryKey, repository),
 		attribute.String(workflowKey, cleanText(job.WorkflowName, metricNameLimit)),
-		attribute.String(jobKey, cleanText(job.Name, metricNameLimit)),
+		attribute.String("ci_job", cleanText(job.Name, metricNameLimit)),
 	))
 }
 
