@@ -76,14 +76,14 @@ jobs:
           check-latest: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
+        uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea  # v4.39.4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           queries: security-extended
 
       - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066  # v4.39.3
+        uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea  # v4.39.4
         with:
           category: "/language:${{ matrix.language }}"
 
@@ -108,7 +108,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Bazel for CI
-        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@3b5ccc290a3243c10ac49b426967bc2b8950911e  # main
+        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@aa2f970279ca268aea6e6fc7fc3851a5b3d2fc5e  # main
         with:
           disk-cache: nightly-mutation-linux
           cache-save: true

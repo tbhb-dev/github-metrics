@@ -52,7 +52,7 @@ jobs:
       # workarounds, from tbhb-dev/rules. Pushes to main skip the disk cache
       # so Bazel runs the actions and uploads their results to the remote cache.
       - name: Set up Bazel for CI
-        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@3b5ccc290a3243c10ac49b426967bc2b8950911e  # main
+        uses: tbhb-dev/rules/.github/actions/setup-bazel-ci@aa2f970279ca268aea6e6fc7fc3851a5b3d2fc5e  # main
         with:
           disk-cache: ${{ github.event_name == 'push' && 'false' || format('{0}-{1}', github.workflow, matrix.os) }}
           cache-save: ${{ github.event_name != 'pull_request' }}
@@ -94,7 +94,7 @@ jobs:
     name: repo
     permissions:
       contents: read
-    uses: tbhb-dev/rules/.github/workflows/repo-checks.yml@3b5ccc290a3243c10ac49b426967bc2b8950911e  # main
+    uses: tbhb-dev/rules/.github/workflows/repo-checks.yml@aa2f970279ca268aea6e6fc7fc3851a5b3d2fc5e  # main
     with:
       gazelle-dirs: .
       govulncheck-target: ""
@@ -115,6 +115,6 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Fail if any needed job did not succeed
-        uses: tbhb-dev/rules/.github/actions/ci-conclusion@3b5ccc290a3243c10ac49b426967bc2b8950911e  # main
+        uses: tbhb-dev/rules/.github/actions/ci-conclusion@aa2f970279ca268aea6e6fc7fc3851a5b3d2fc5e  # main
         with:
           needs: ${{ toJSON(needs) }}
